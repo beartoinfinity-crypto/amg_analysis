@@ -238,6 +238,70 @@ def test_ptm_info_line_parses_city_pair_and_part(tmp_path, make_archive):
     )
 
 
+def test_fwd_line_stores_airport_not_registration(tmp_path, make_archive):
+    row = ingest_one(
+        tmp_path,
+        make_archive,
+        "\r\n\x01QU HKGTSXH\r\n"
+        ".HKGMUXX 280825\r\n"
+        "\x02FWD\r\n"
+        "MU725/28.HKG.3/3/7\r\n"
+        ".ICN.B30.R40.A25.L1.T350.HKG/2.GBR/10.CHN/120\r\n"
+        "\x03\r\n",
+    )
+    assert row == envelope("FWD", "QU", "HKGTSXH", "HKGMUXX", "MU725",
+                           flight_airport="HKG")
+
+
+def test_asm_line_parses_flight_and_explicit_year_date(tmp_path, make_archive):
+    row = ingest_one(
+        tmp_path,
+        make_archive,
+        "\r\n\x01QU HKGTSXH\r\n"
+        ".HKGUOXX 120825\r\n"
+        "\x02ASM\r\n"
+        "UTC\r\n"
+        "EQT\r\n"
+        "UO112/12MAY26 6/UO113/12\r\n"
+        "J 321 Y230 BLEK\r\n"
+        "\x03\r\n",
+    )
+    assert row == envelope("ASM", "QU", "HKGTSXH", "HKGUOXX", "UO112",
+                           flight_date="20260512")
+
+
+def test_ldm_new_style_dotted_line_parses(tmp_path, make_archive):
+    row = ingest_one(
+        tmp_path,
+        make_archive,
+        "\r\n\x01QD HKGTSXH\r\n"
+        ".HKGAPCA CA/161100\r\n"
+        "\x02LDM\r\n"
+        "FROM: Air China Hong Kong Airport Station\r\n"
+        "QUOTE\r\n"
+        "LDM\r\n"
+        "CA0111/16MAY26.B8579.J30G16Y255.03/12\r\n"
+        "-HKG.208/36/0.0.T18797\r\n"
+        "\x03\r\n",
+    )
+    assert row == envelope("LDM", "QD", "HKGTSXH", "HKGAPCA",
+                           "CA0111", "B8579", flight_date="20260516")
+
+
+def test_div_uses_movement_style_line(tmp_path, make_archive):
+    row = ingest_one(
+        tmp_path,
+        make_archive,
+        "\r\n\x01QU HKGTSXH\r\n"
+        ".HDQNPNZ 220216\r\n"
+        "\x02DIV\r\n"
+        "NZ081/21.ZKNZC.HKG\r\n"
+        "EA0254 BNE\r\n"
+        "\x03\r\n",
+    )
+    assert row == envelope("DIV", "QU", "HKGTSXH", "HDQNPNZ", "NZ081", "ZKNZC", "HKG")
+
+
 def test_flight_line_third_dot_segment_stores_airport(tmp_path, make_archive):
     row = ingest_one(
         tmp_path,
