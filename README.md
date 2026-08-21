@@ -25,10 +25,23 @@ pip install -e .
 
 ## Usage
 
+### Quick start (GUI)
+
+Double-click `run.bat` (or run `python -m amg gui`). A window lists every
+`*.tar.Z` with its size and indexed/pending state; tick the ones to import
+(pending archives are pre-ticked) and press **Import selected**. Progress and
+the final summary appear in the window.
+
 ### 1. Build the index
 
 ```console
 python -m amg ingest AMG_msg --db index.db
+```
+
+To import just some archives from the command line:
+
+```console
+python -m amg ingest AMG_msg --db index.db --only PROCESSED_20260610_0025.tar.Z
 ```
 
 Ingest is incremental and idempotent: archives already recorded in the index

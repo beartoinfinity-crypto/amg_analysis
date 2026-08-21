@@ -162,13 +162,12 @@ def ingest_archive(archive_path, con):
     )
 
 
-def cmd_ingest(args):
-    db_path = Path(args.db)
+def ingest_archives(archive_paths, db_path):
     con = sqlite3.connect(db_path)
     con.executescript(SCHEMA)
     seen = dict(con.execute("SELECT name, size FROM archives"))
     ingested = skipped = failed = 0
-    for archive_path in sorted(Path(args.archive_dir).glob("*.tar.Z")):
+    for archive_path in archive_paths:
         if seen.get(archive_path.name) == archive_path.stat().st_size:
             skipped += 1
             continue
@@ -180,8 +179,6 @@ def cmd_ingest(args):
             con.rollback()
             print(f"failed to ingest {archive_path.name}: {error}", file=sys.stderr)
             failed += 1
-    con.close()
-    con = sqlite3.connect(db_path)
     fts_stale = con.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0] != con.execute(
         "SELECT COUNT(*) FROM messages"
     ).fetchone()[0]
@@ -189,6 +186,15 @@ def cmd_ingest(args):
         con.execute("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')")
         con.commit()
     con.close()
+    return ingested, skipped, failed
+
+
+def cmd_ingest(args):
+    paths = sorted(Path(args.archive_dir).glob("*.tar.Z"))
+    if args.only:
+        wanted = set(args.only)
+        paths = [p for p in paths if p.name in wanted]
+    ingested, skipped, failed = ingest_archives(paths, Path(args.db))
     print(
         f"ingest summary: {ingested} ingested, {skipped} skipped, {failed} failed",
         file=sys.stderr,
@@ -198,6 +204,25 @@ def cmd_ingest(args):
     if failed:
         return 1
     return 0
+
+
+def scan_archives(archive_dir, db_path):
+    indexed = {}
+    if Path(db_path).exists():
+        con = sqlite3.connect(db_path)
+        try:
+            indexed = dict(con.execute("SELECT name, size FROM archives"))
+        finally:
+            con.close()
+    entries = []
+    for archive_path in sorted(Path(archive_dir).glob("*.tar.Z")):
+        size_bytes = archive_path.stat().st_size
+        entries.append({
+            "name": archive_path.name,
+            "size_bytes": size_bytes,
+            "state": "indexed" if indexed.get(archive_path.name) == size_bytes else "pending",
+        })
+    return entries
 
 
 def cmd_status(args):
@@ -326,6 +351,12 @@ def cmd_stats(args):
     return 0
 
 
+def cmd_gui(args):
+    from amg.gui import run_gui
+
+    return run_gui(Path(args.archive_dir), Path(args.db))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="amg")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -333,6 +364,10 @@ def main(argv=None):
     p_ingest = sub.add_parser("ingest", help="ingest archives into the index")
     p_ingest.add_argument("archive_dir")
     p_ingest.add_argument("--db", required=True)
+    p_ingest.add_argument(
+        "--only", nargs="*", metavar="NAME",
+        help="import just these archive file names instead of the whole folder",
+    )
 
     p_search = sub.add_parser("search", help="search indexed messages")
     p_search.add_argument("--db", required=True)
@@ -361,6 +396,10 @@ def main(argv=None):
     p_status.add_argument("--db", required=True)
     p_status.add_argument("--archive-dir", required=True)
 
+    p_gui = sub.add_parser("gui", help="open a window to pick archives to import")
+    p_gui.add_argument("--archive-dir", default="AMG_msg")
+    p_gui.add_argument("--db", default="index.db")
+
     try:
         args = parser.parse_args(argv)
     except SystemExit as exit_request:
@@ -371,6 +410,7 @@ def main(argv=None):
         "show": cmd_show,
         "stats": cmd_stats,
         "status": cmd_status,
+        "gui": cmd_gui,
     }
     return handlers[args.command](args)
 
