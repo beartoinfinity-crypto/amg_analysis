@@ -35,6 +35,12 @@ CREATE TABLE IF NOT EXISTS archives (
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING
   fts5(raw_text, content='messages', content_rowid='id');
+CREATE VIEW IF NOT EXISTS messages_readable AS
+SELECT id, received_at, station, status, msg_type, priority, destination, origin,
+       flight_number, aircraft_reg, source_archive, source_file,
+       replace(replace(replace(raw_text, char(1), ''), char(2), ''), char(3), '')
+         AS message_text
+FROM messages;
 """
 
 MESSAGE_TYPES = {

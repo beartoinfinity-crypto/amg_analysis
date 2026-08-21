@@ -155,6 +155,25 @@ def test_real_corpus_ingests_completely(tmp_path):
     )
 
 
+def test_readable_view_strips_control_characters(tmp_path, make_archive):
+    archive_dir = tmp_path / "AMG_msg"
+    archive_dir.mkdir()
+    make_archive(
+        archive_dir / "PROCESSED_20260610_0025.tar.Z",
+        {"HKG/260607002540778.rcv": "\x01QU HKGTSXH\r\n\x02MVT\r\nCI5825/06.B18778.HKG\r\n\x03"},
+    )
+    db = tmp_path / "index.db"
+
+    exit_code = main(["ingest", str(archive_dir), "--db", str(db)])
+
+    assert exit_code == 0
+    con = sqlite3.connect(db)
+    row = con.execute(
+        "SELECT message_text FROM messages_readable WHERE id = 1"
+    ).fetchone()
+    assert row[0] == "QU HKGTSXH\r\nMVT\r\nCI5825/06.B18778.HKG\r\n"
+
+
 def test_ingest_survives_nonstandard_filename_shapes(tmp_path, make_archive):
     archive_dir = tmp_path / "AMG_msg"
     archive_dir.mkdir()
