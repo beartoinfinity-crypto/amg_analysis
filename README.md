@@ -15,13 +15,13 @@ pip install -e .
 
 ## Concepts
 
-- **Archive** — a daily `.tar.Z` file named `PROCESSED_YYYYMMDD_HHMM.tar.Z` or
+- **Archive** ??a daily `.tar.Z` file named `PROCESSED_YYYYMMDD_HHMM.tar.Z` or
   `CORRUPTED_YYYYMMDD_HHMM.tar.Z`. Archives are immutable input; the toolkit
   never modifies them.
-- **Message** — one raw Type B message per inner file (`.rcv` = processed,
+- **Message** ??one raw Type B message per inner file (`.rcv` = processed,
   `.COR` = corrupted), named with its receipt timestamp under a station folder
   (e.g. `HKG/260607002540778.rcv`).
-- **Index** — a SQLite database you create once and reuse (`--db PATH`).
+- **Index** ??a SQLite database you create once and reuse (`--db PATH`).
 
 ## Usage
 
@@ -35,13 +35,13 @@ the final summary appear in the window.
 ### 1. Build the index
 
 ```console
-python -m amg ingest AMG_msg --db index.db
+python -m amg ingest AMG_msg --db amg_messages.db
 ```
 
 To import just some archives from the command line:
 
 ```console
-python -m amg ingest AMG_msg --db index.db --only PROCESSED_20260610_0025.tar.Z
+python -m amg ingest AMG_msg --db amg_messages.db --only PROCESSED_20260610_0025.tar.Z
 ```
 
 Ingest is incremental and idempotent: archives already recorded in the index
@@ -59,16 +59,16 @@ Exit codes: `0` clean, `3` some archives failed, `1` every archive failed.
 Filters combine freely; results are newest-first.
 
 ```console
-python -m amg search --db index.db --type MVT --flight CI5825
-python -m amg search --db index.db --from 2026-06-07 --to 2026-06-07
-python -m amg search --db index.db --origin HKGODCI --status corrupted
-python -m amg search --db index.db --q "B18778"
-python -m amg search --db index.db --type BSM --csv > bsm.csv
+python -m amg search --db amg_messages.db --type MVT --flight CI5825
+python -m amg search --db amg_messages.db --from 2026-06-07 --to 2026-06-07
+python -m amg search --db amg_messages.db --origin HKGODCI --status corrupted
+python -m amg search --db amg_messages.db --q "B18778"
+python -m amg search --db amg_messages.db --type BSM --csv > bsm.csv
 ```
 
 | Filter | Meaning |
 | --- | --- |
-| `--type` | message keyword: MVT, MVA, CHG, BSM, PNL, CPM, SVC, … (unknown bodies are typed OTHER) |
+| `--type` | message keyword: MVT, MVA, CHG, BSM, PNL, CPM, SVC, ??(unknown bodies are typed OTHER) |
 | `--flight` | flight number parsed from movement-style lines, e.g. `CI5825` |
 | `--origin` / `--dest` | Type B origin/destination address, e.g. `HKGTSXH` |
 | `--status` | `processed` or `corrupted` |
@@ -79,7 +79,7 @@ python -m amg search --db index.db --type BSM --csv > bsm.csv
 ### 3. Read a message
 
 ```console
-python -m amg show --db index.db 42
+python -m amg show --db amg_messages.db 42
 ```
 
 Prints the stored raw text byte-for-byte.
@@ -87,10 +87,10 @@ Prints the stored raw text byte-for-byte.
 ### 4. Analyse
 
 ```console
-python -m amg stats --db index.db --by day      # volumes + corrupted split per day
-python -m amg stats --db index.db --by hour     # intra-day traffic profile
-python -m amg stats --db index.db --by type     # message mix
-python -m amg stats --db index.db --by airline  # carrier attribution from flight prefixes
+python -m amg stats --db amg_messages.db --by day      # volumes + corrupted split per day
+python -m amg stats --db amg_messages.db --by hour     # intra-day traffic profile
+python -m amg stats --db amg_messages.db --by type     # message mix
+python -m amg stats --db amg_messages.db --by airline  # carrier attribution from flight prefixes
 ```
 
 `search` and `stats` accept `--csv`.
@@ -98,7 +98,7 @@ python -m amg stats --db index.db --by airline  # carrier attribution from fligh
 ### 5. Check freshness
 
 ```console
-python -m amg status --db index.db --archive-dir AMG_msg
+python -m amg status --db amg_messages.db --archive-dir AMG_msg
 ```
 
 Lists every archive as `indexed` or `pending`.

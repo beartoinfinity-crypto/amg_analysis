@@ -398,7 +398,7 @@ def main(argv=None):
 
     p_gui = sub.add_parser("gui", help="open a window to pick archives to import")
     p_gui.add_argument("--archive-dir", default="AMG_msg")
-    p_gui.add_argument("--db", default="index.db")
+    p_gui.add_argument("--db", default="amg_messages.db")
 
     try:
         args = parser.parse_args(argv)
