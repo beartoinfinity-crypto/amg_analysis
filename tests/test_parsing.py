@@ -14,9 +14,22 @@ def ingest_one(tmp_path, make_archive, text):
     assert main(["ingest", str(archive_dir), "--db", str(db)]) == 0
     con = sqlite3.connect(db)
     return con.execute(
-        "SELECT msg_type, priority, destination, origin, flight_number, aircraft_reg"
-        " FROM messages"
+        "SELECT msg_type, priority, destination, origin, flight_number, aircraft_reg,"
+        " flight_airport FROM messages"
     ).fetchone()
+
+
+def test_flight_line_third_dot_segment_stores_airport(tmp_path, make_archive):
+    row = ingest_one(
+        tmp_path,
+        make_archive,
+        "\r\n\x01QU HKGTSXH\r\n"
+        ".HKGODCI 121625\r\n"
+        "\x02MVT\r\n"
+        "CI5825/12.B18778.HKG\r\n"
+        "\x03\r\n",
+    )
+    assert row == ("MVT", "QU", "HKGTSXH", "HKGODCI", "CI5825", "B18778", "HKG")
 
 
 def test_movement_message_parses_envelope_and_flight(tmp_path, make_archive):
@@ -31,7 +44,7 @@ def test_movement_message_parses_envelope_and_flight(tmp_path, make_archive):
         "SI\n"
         "FR 50500\n",
     )
-    assert row == ("MVT", "QD", "HKGTSXH", "HKGODCI", "CI5825", "B18778")
+    assert row == ("MVT", "QD", "HKGTSXH", "HKGODCI", "CI5825", "B18778", "HKG")
 
 
 def test_baggage_message_parses_type_without_flight(tmp_path, make_archive):
@@ -45,7 +58,7 @@ def test_baggage_message_parses_type_without_flight(tmp_path, make_archive):
         ".P/FRYDA/PATRYKDAWID\n"
         "ENDBSM\n",
     )
-    assert row == ("BSM", "QU", "HKGTSXH", "ISTKMTK", None, None)
+    assert row == ("BSM", "QU", "HKGTSXH", "ISTKMTK", None, None, None)
 
 
 def test_movement_with_distribution_list_finds_origin(tmp_path, make_archive):
@@ -59,12 +72,12 @@ def test_movement_with_distribution_list_finds_origin(tmp_path, make_archive):
         "MVA\n"
         "NH814/06.JA808A.HKG\n",
     )
-    assert row == ("MVA", "QU", "HKGTSXH", "TYOFSNH", "NH814", "JA808A")
+    assert row == ("MVA", "QU", "HKGTSXH", "TYOFSNH", "NH814", "JA808A", "HKG")
 
 
 def test_unrecognised_body_typed_other_without_fields(tmp_path, make_archive):
     row = ingest_one(tmp_path, make_archive, "hello world\nno envelope here\n")
-    assert row == ("OTHER", None, None, None, None, None)
+    assert row == ("OTHER", None, None, None, None, None, None)
 
 
 def test_real_type_b_control_character_framing_parses(tmp_path, make_archive):
@@ -82,7 +95,7 @@ def test_real_type_b_control_character_framing_parses(tmp_path, make_archive):
         "SI CONFE91/CC3/CA9/DH1\r\n"
         "\x03\r\n",
     )
-    assert row == ("MVT", "QU", "HKGTSXH", "TYOXKJL", "JL0029", "JA872J")
+    assert row == ("MVT", "QU", "HKGTSXH", "TYOXKJL", "JL0029", "JA872J", "HND")
 
 
 def test_ldm_inline_flight_on_keyword_line_parses(tmp_path, make_archive):
@@ -96,7 +109,7 @@ def test_ldm_inline_flight_on_keyword_line_parses(tmp_path, make_archive):
         "BW 141087 BI 39.5\r\n"
         "\x03\r\n",
     )
-    assert row == ("LDM", "QU", "HKGTSXH", "TYOOZNH", "NH0813", "JA838A")
+    assert row == ("LDM", "QU", "HKGTSXH", "TYOOZNH", "NH0813", "JA838A", None)
 
 
 def test_unknown_three_letter_keyword_is_typed_with_flight(tmp_path, make_archive):
@@ -109,7 +122,7 @@ def test_unknown_three_letter_keyword_is_typed_with_flight(tmp_path, make_archiv
         "NH0814/08.JA839A.42/C\r\n"
         "\x03\r\n",
     )
-    assert row == ("ADL", "QU", "HKGTSXH", "HKGNHQS", "NH0814", "JA839A")
+    assert row == ("ADL", "QU", "HKGTSXH", "HKGNHQS", "NH0814", "JA839A", None)
 
 
 def test_soh_address_continuation_lines_still_find_origin(tmp_path, make_archive):
@@ -124,4 +137,4 @@ def test_soh_address_continuation_lines_still_find_origin(tmp_path, make_archive
         "\x02MVT\r\n"
         "TG600/07.HSTKY.BKK\r\n",
     )
-    assert row == ("MVT", "QN", "HKGTSXH", "HDQOPTG", "TG600", "HSTKY")
+    assert row == ("MVT", "QN", "HKGTSXH", "HDQOPTG", "TG600", "HSTKY", "BKK")

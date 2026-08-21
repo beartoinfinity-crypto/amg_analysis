@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS messages (
   origin TEXT,
   flight_number TEXT,
   aircraft_reg TEXT,
+  flight_airport TEXT,
   raw_text TEXT NOT NULL,
   parse_error TEXT,
   source_archive TEXT NOT NULL,
@@ -37,13 +38,15 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING
   fts5(raw_text, content='messages', content_rowid='id');
 CREATE VIEW IF NOT EXISTS messages_readable AS
 SELECT id, received_at, station, status, msg_type, priority, destination, origin,
-       flight_number, aircraft_reg, source_archive, source_file,
+       flight_number, aircraft_reg, flight_airport, source_archive, source_file,
        replace(replace(replace(raw_text, char(1), ''), char(2), ''), char(3), '')
          AS message_text
 FROM messages;
 """
 
-FLIGHT_LINE = re.compile(r"^([A-Z0-9]{2,3}\d+[A-Z]?)/\d+\.([A-Z0-9]+)\.", re.ASCII)
+FLIGHT_LINE = re.compile(
+    r"^([A-Z0-9]{2,3}\d+[A-Z]?)/\d+\.([A-Z0-9]+)(?:\.([A-Z]{3}))?", re.ASCII
+)
 KEYWORD_LINE = re.compile(r"^([A-Z]{3})(?:\s+(.*))?$")
 
 
@@ -93,13 +96,15 @@ def parse_envelope(raw_text):
                 origin = line[1:].split()[0]
                 break
 
-    flight_number = aircraft_reg = None
+    flight_number = aircraft_reg = flight_airport = None
     if keyword_index is not None:
         candidates = ([keyword_rest] if keyword_rest else []) + lines[keyword_index + 1 :]
         for line in candidates:
             match = FLIGHT_LINE.match(line.strip())
             if match:
-                flight_number, aircraft_reg = match.group(1), match.group(2)
+                flight_number = match.group(1)
+                aircraft_reg = match.group(2)
+                flight_airport = match.group(3)
                 break
 
     return {
@@ -109,6 +114,7 @@ def parse_envelope(raw_text):
         "origin": origin,
         "flight_number": flight_number,
         "aircraft_reg": aircraft_reg,
+        "flight_airport": flight_airport,
     }
 
 
@@ -136,7 +142,8 @@ def ingest_archive(archive_path, con):
             except Exception as error:
                 raw = ""
                 envelope = {"msg_type": "OTHER", "priority": None, "destination": None,
-                            "origin": None, "flight_number": None, "aircraft_reg": None}
+                            "origin": None, "flight_number": None, "aircraft_reg": None,
+                            "flight_airport": None}
                 parse_error = f"{type(error).__name__}: {error}"
             rows.append(
                 (
@@ -149,6 +156,7 @@ def ingest_archive(archive_path, con):
                     envelope["origin"],
                     envelope["flight_number"],
                     envelope["aircraft_reg"],
+                    envelope["flight_airport"],
                     raw,
                     parse_error,
                     archive_path.name,
@@ -158,8 +166,9 @@ def ingest_archive(archive_path, con):
     con.executemany(
         "INSERT OR IGNORE INTO messages"
         " (received_at, station, status, msg_type, priority, destination, origin,"
-        "  flight_number, aircraft_reg, raw_text, parse_error, source_archive, source_file)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "  flight_number, aircraft_reg, flight_airport, raw_text, parse_error,"
+        "  source_archive, source_file)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
     con.execute(
