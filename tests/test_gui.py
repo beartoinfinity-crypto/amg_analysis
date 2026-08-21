@@ -1,6 +1,6 @@
 import sqlite3
 
-from amg.cli import scan_archives, main
+from amg.cli import main, rebuild_archives, scan_archives
 
 
 def make_two_archives(tmp_path, make_archive):
@@ -52,3 +52,25 @@ def test_scan_archives_without_db_marks_everything_pending(tmp_path, make_archiv
     entries = scan_archives(archive_dir, tmp_path / "missing.db")
 
     assert {e["state"] for e in entries} == {"pending"}
+
+
+def test_rebuild_replaces_rows_parsed_with_older_rules(tmp_path, make_archive):
+    archive_dir = tmp_path / "AMG_msg"
+    archive_dir.mkdir()
+    archive_path = archive_dir / "PROCESSED_20260610_0025.tar.Z"
+    make_archive(archive_path, {"HKG/260607002540778.rcv": "\x02PNL\r\nLJ805/13MAY MAN PART1\r\n"})
+    db = tmp_path / "index.db"
+    main(["ingest", str(archive_dir), "--db", str(db)])
+    make_archive(
+        archive_path,
+        {"HKG/260607002540778.rcv": "\x02PNL\r\nLJ805/13MAY MAN PART2\r\n"},
+    )
+
+    ingested, skipped, failed = rebuild_archives(sorted(archive_dir.glob("*.tar.Z")), db)
+
+    assert (ingested, skipped, failed) == (1, 0, 0)
+    con = sqlite3.connect(db)
+    row = con.execute(
+        "SELECT flight_airport, part_number FROM messages"
+    ).fetchone()
+    assert row == ("MAN", 2)

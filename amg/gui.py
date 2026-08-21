@@ -1,8 +1,8 @@
 import threading
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
-from amg.cli import ingest_archives, scan_archives
+from amg.cli import ingest_archives, rebuild_archives, scan_archives
 
 
 class ArchivePicker:
@@ -11,6 +11,7 @@ class ArchivePicker:
         self.archive_dir = archive_dir
         self.db_path = db_path
         self.busy = False
+        self.stop_event = threading.Event()
 
         root.title("AMG Message Toolkit")
         root.geometry("760x520")
@@ -45,6 +46,14 @@ class ArchivePicker:
             bottom, text="Import selected", command=self.start_import,
         )
         self.import_button.pack(side="right")
+        self.rebuild_button = ttk.Button(
+            bottom, text="Full rebuild", command=self.start_rebuild,
+        )
+        self.rebuild_button.pack(side="right", padx=6)
+        self.stop_button = ttk.Button(
+            bottom, text="Stop", command=self.stop_work, state=["disabled"],
+        )
+        self.stop_button.pack(side="right")
         self.status_var = tk.StringVar(value="")
         ttk.Label(bottom, textvariable=self.status_var).pack(side="right", padx=12)
 
@@ -92,32 +101,71 @@ class ArchivePicker:
         if not names:
             self.status_var.set("nothing selected")
             return
-        self.busy = True
-        self.import_button.state(["disabled"])
         paths = [self.archive_dir / name for name in names]
+        if not messagebox.askyesno(
+            "Import", f"Import {len(paths)} archive(s)?"
+        ):
+            return
+        self.run_in_background(paths, rebuild=False)
+
+    def start_rebuild(self):
+        if self.busy:
+            return
+        names = [item for item in self.tree.get_children()]
+        if not names:
+            self.status_var.set("no archives found")
+            return
+        if not messagebox.askyesno(
+            "Full rebuild",
+            f"Re-parse all {len(names)} archives from scratch?\n"
+            "The current index contents will be replaced (this takes a few minutes).",
+        ):
+            return
+        paths = [self.archive_dir / name for name in names]
+        self.run_in_background(paths, rebuild=True)
+
+    def run_in_background(self, paths, rebuild):
+        self.busy = True
+        self.stop_event.clear()
+        self.import_button.state(["disabled"])
+        self.rebuild_button.state(["disabled"])
+        self.stop_button.state(["!disabled"])
         total = len(paths)
+        work = rebuild_archives if rebuild else ingest_archives
 
         def worker():
             ingested = skipped = failed = 0
+            stopped = False
             for index, path in enumerate(paths, start=1):
-                n_ing, n_skip, n_fail = ingest_archives([path], self.db_path)
+                if self.stop_event.is_set():
+                    stopped = True
+                    break
+                n_ing, n_skip, n_fail = work([path], self.db_path)
                 ingested += n_ing
                 skipped += n_skip
                 failed += n_fail
-                self.root.after(0, self.set_status, f"importing {index}/{total}...")
-            self.root.after(0, self.finish_import, ingested, skipped, failed)
+                label = "rebuilding" if rebuild else "importing"
+                self.root.after(0, self.set_status, f"{label} {index}/{total}...")
+            self.root.after(0, self.finish_import, ingested, skipped, failed, stopped)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def stop_work(self):
+        self.stop_event.set()
+        self.status_var.set("stopping after current archive...")
 
     def set_status(self, text):
         self.status_var.set(text)
 
-    def finish_import(self, ingested, skipped, failed):
+    def finish_import(self, ingested, skipped, failed, stopped=False):
         self.busy = False
         self.import_button.state(["!disabled"])
+        self.rebuild_button.state(["!disabled"])
+        self.stop_button.state(["disabled"])
         self.refresh()
+        prefix = "stopped" if stopped else "done"
         self.status_var.set(
-            f"done: {ingested} ingested, {skipped} skipped, {failed} failed"
+            f"{prefix}: {ingested} ingested, {skipped} skipped, {failed} failed"
         )
 
 

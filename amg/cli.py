@@ -7,8 +7,31 @@ import sqlite3
 import subprocess
 import sys
 import tarfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, date, timedelta
 from pathlib import Path
+
+MONTHS = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+ARCHIVE_DATE = re.compile(r"_(\d{4})(\d{2})(\d{2})_\d{4}\.tar\.Z$")
+
+
+def normalize_flight_date(flight_date, archive_name):
+    if not flight_date:
+        return None
+    match = re.fullmatch(r"(\d{1,2})([A-Z]{3})", flight_date)
+    archive_match = ARCHIVE_DATE.search(archive_name)
+    if not match or not archive_match or match.group(2) not in MONTHS:
+        return None
+    day, month = int(match.group(1)), MONTHS[match.group(2)]
+    year = int(archive_match.group(1))
+    archive_day = date(int(archive_match.group(1)), int(archive_match.group(2)),
+                       int(archive_match.group(3)))
+    flight_day = date(year, month, day)
+    if (flight_day - archive_day).days > 183:
+        flight_day = date(year - 1, month, day)
+    return f"{flight_day:%Y%m%d}"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -177,7 +200,7 @@ def ingest_archive(archive_path, con):
                     envelope["flight_number"],
                     envelope["aircraft_reg"],
                     envelope["flight_airport"],
-                    envelope["flight_date"],
+                    normalize_flight_date(envelope["flight_date"], archive_path.name),
                     envelope["part_number"],
                     raw,
                     parse_error,
@@ -224,6 +247,16 @@ def ingest_archives(archive_paths, db_path):
         con.commit()
     con.close()
     return ingested, skipped, failed
+
+
+def rebuild_archives(archive_paths, db_path):
+    con = sqlite3.connect(db_path)
+    con.executescript(SCHEMA)
+    con.execute("DELETE FROM messages")
+    con.execute("DELETE FROM archives")
+    con.commit()
+    con.close()
+    return ingest_archives(archive_paths, db_path)
 
 
 def cmd_ingest(args):

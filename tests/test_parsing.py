@@ -3,11 +3,11 @@ import sqlite3
 from amg.cli import main
 
 
-def ingest_one(tmp_path, make_archive, text):
+def ingest_one(tmp_path, make_archive, text, archive_name="PROCESSED_20260610_0025.tar.Z"):
     archive_dir = tmp_path / "AMG_msg"
     archive_dir.mkdir()
     make_archive(
-        archive_dir / "PROCESSED_20260610_0025.tar.Z",
+        archive_dir / archive_name,
         {"HKG/260607002540778.rcv": text},
     )
     db = tmp_path / "index.db"
@@ -166,7 +166,7 @@ def test_pnl_info_line_parses_flight_date_airport_and_part(tmp_path, make_archiv
     )
     assert row == envelope(
         "PNL", "QU", "HKGTSXH", "HKGUKBA", "LJ805",
-        flight_airport="MAN", flight_date="13MAY", part_number=1,
+        flight_airport="MAN", flight_date="20260513", part_number=1,
     )
 
 
@@ -182,7 +182,24 @@ def test_pnl_without_part_still_parses_date_and_airport(tmp_path, make_archive):
     )
     assert row == envelope(
         "PNL", "QU", "HKGTSXH", "HKGUKBA", "CX841",
-        flight_airport="JFK", flight_date="08JUN",
+        flight_airport="JFK", flight_date="20260608",
+    )
+
+
+def test_flight_date_year_wraps_to_previous_year(tmp_path, make_archive):
+    row = ingest_one(
+        tmp_path,
+        make_archive,
+        "\r\n\x01QU HKGTSXH\r\n"
+        ".HKGUKBA 020015\r\n"
+        "\x02PNL\r\n"
+        "LJ805/28DEC MAN\r\n"
+        "\x03\r\n",
+        archive_name="PROCESSED_20260102_0025.tar.Z",
+    )
+    assert row == envelope(
+        "PNL", "QU", "HKGTSXH", "HKGUKBA", "LJ805",
+        flight_airport="MAN", flight_date="20251228",
     )
 
 
@@ -200,7 +217,7 @@ def test_adl_info_line_parses_flight_date_airport_and_part(tmp_path, make_archiv
     )
     assert row == envelope(
         "ADL", "QK", "HKGTSXH", "MUCPNTG", "TG600",
-        flight_airport="BKK", flight_date="02MAY", part_number=1,
+        flight_airport="BKK", flight_date="20260502", part_number=1,
     )
 
 
@@ -217,7 +234,7 @@ def test_ptm_info_line_parses_city_pair_and_part(tmp_path, make_archive):
     )
     assert row == envelope(
         "PTM", "QD", "HKGTSXH", "PEKKMCA", "UO251",
-        flight_airport="SYXHKG", flight_date="30APR", part_number=1,
+        flight_airport="SYXHKG", flight_date="20260430", part_number=1,
     )
 
 
