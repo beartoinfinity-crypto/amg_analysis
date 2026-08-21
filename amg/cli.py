@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS messages (
   flight_number TEXT,
   aircraft_reg TEXT,
   flight_airport TEXT,
+  flight_date TEXT,
+  part_number INTEGER,
   raw_text TEXT NOT NULL,
   parse_error TEXT,
   source_archive TEXT NOT NULL,
@@ -38,7 +40,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING
   fts5(raw_text, content='messages', content_rowid='id');
 CREATE VIEW IF NOT EXISTS messages_readable AS
 SELECT id, received_at, station, status, msg_type, priority, destination, origin,
-       flight_number, aircraft_reg, flight_airport, source_archive, source_file,
+       flight_number, aircraft_reg, flight_airport, flight_date, part_number,
+       source_archive, source_file,
        replace(replace(replace(raw_text, char(1), ''), char(2), ''), char(3), '')
          AS message_text
 FROM messages;
@@ -46,6 +49,10 @@ FROM messages;
 
 FLIGHT_LINE = re.compile(
     r"^([A-Z0-9]{2,3}\d+[A-Z]?)/\d+\.([A-Z0-9]+)(?:\.([A-Z]{3}))?", re.ASCII
+)
+PNL_LINE = re.compile(
+    r"^([A-Z0-9]{2,3}\d+[A-Z]?)/(\d{1,2}[A-Z]{3})\s+([A-Z]{3})(?:\s+PART\s*(\d+))?",
+    re.ASCII,
 )
 KEYWORD_LINE = re.compile(r"^([A-Z]{3})(?:\s+(.*))?$")
 
@@ -97,14 +104,23 @@ def parse_envelope(raw_text):
                 break
 
     flight_number = aircraft_reg = flight_airport = None
+    flight_date = part_number = None
     if keyword_index is not None:
         candidates = ([keyword_rest] if keyword_rest else []) + lines[keyword_index + 1 :]
         for line in candidates:
-            match = FLIGHT_LINE.match(line.strip())
+            line = line.strip()
+            match = FLIGHT_LINE.match(line)
             if match:
                 flight_number = match.group(1)
                 aircraft_reg = match.group(2)
                 flight_airport = match.group(3)
+                break
+            match = PNL_LINE.match(line)
+            if match:
+                flight_number = match.group(1)
+                flight_date = match.group(2)
+                flight_airport = match.group(3)
+                part_number = int(match.group(4)) if match.group(4) else None
                 break
 
     return {
@@ -115,6 +131,8 @@ def parse_envelope(raw_text):
         "flight_number": flight_number,
         "aircraft_reg": aircraft_reg,
         "flight_airport": flight_airport,
+        "flight_date": flight_date,
+        "part_number": part_number,
     }
 
 
@@ -143,7 +161,8 @@ def ingest_archive(archive_path, con):
                 raw = ""
                 envelope = {"msg_type": "OTHER", "priority": None, "destination": None,
                             "origin": None, "flight_number": None, "aircraft_reg": None,
-                            "flight_airport": None}
+                            "flight_airport": None, "flight_date": None,
+                            "part_number": None}
                 parse_error = f"{type(error).__name__}: {error}"
             rows.append(
                 (
@@ -157,6 +176,8 @@ def ingest_archive(archive_path, con):
                     envelope["flight_number"],
                     envelope["aircraft_reg"],
                     envelope["flight_airport"],
+                    envelope["flight_date"],
+                    envelope["part_number"],
                     raw,
                     parse_error,
                     archive_path.name,
@@ -166,9 +187,9 @@ def ingest_archive(archive_path, con):
     con.executemany(
         "INSERT OR IGNORE INTO messages"
         " (received_at, station, status, msg_type, priority, destination, origin,"
-        "  flight_number, aircraft_reg, flight_airport, raw_text, parse_error,"
-        "  source_archive, source_file)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "  flight_number, aircraft_reg, flight_airport, flight_date, part_number,"
+        "  raw_text, parse_error, source_archive, source_file)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
     con.execute(
