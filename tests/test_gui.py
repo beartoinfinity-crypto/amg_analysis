@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 from amg.cli import main, rebuild_archives, scan_archives
 
 
@@ -74,3 +76,33 @@ def test_rebuild_replaces_rows_parsed_with_older_rules(tmp_path, make_archive):
         "SELECT flight_airport, part_number FROM messages"
     ).fetchone()
     assert row == ("MAN", 2)
+
+
+def test_rebuild_refuses_to_wipe_a_locked_database(tmp_path, make_archive):
+    archive_dir = make_two_archives(tmp_path, make_archive)
+    db = tmp_path / "index.db"
+    main(["ingest", str(archive_dir), "--db", str(db)])
+    blocker = sqlite3.connect(db, timeout=100)
+    blocker.execute("BEGIN EXCLUSIVE")
+
+    with pytest.raises(RuntimeError, match="locked"):
+        rebuild_archives(sorted(archive_dir.glob("*.tar.Z")), db)
+
+    assert blocker.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 2
+    blocker.rollback()
+    blocker.close()
+
+
+def test_ingest_on_locked_database_fails_fast_with_clear_message(tmp_path, make_archive, capsys):
+    archive_dir = make_two_archives(tmp_path, make_archive)
+    db = tmp_path / "index.db"
+    main(["ingest", str(archive_dir), "--db", str(db)])
+    blocker = sqlite3.connect(db, timeout=100)
+    blocker.execute("BEGIN EXCLUSIVE")
+
+    exit_code = main(["ingest", str(archive_dir), "--db", str(db)])
+
+    assert exit_code == 1
+    assert "locked" in capsys.readouterr().err
+    blocker.rollback()
+    blocker.close()

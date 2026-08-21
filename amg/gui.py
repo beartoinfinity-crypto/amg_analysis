@@ -134,25 +134,35 @@ class ArchivePicker:
         work = rebuild_archives if rebuild else ingest_archives
 
         def worker():
-            ingested = skipped = failed = 0
-            stopped = False
-            for index, path in enumerate(paths, start=1):
-                if self.stop_event.is_set():
-                    stopped = True
-                    break
-                n_ing, n_skip, n_fail = work([path], self.db_path)
-                ingested += n_ing
-                skipped += n_skip
-                failed += n_fail
-                label = "rebuilding" if rebuild else "importing"
-                self.root.after(0, self.set_status, f"{label} {index}/{total}...")
-            self.root.after(0, self.finish_import, ingested, skipped, failed, stopped)
+            try:
+                ingested = skipped = failed = 0
+                stopped = False
+                for index, path in enumerate(paths, start=1):
+                    if self.stop_event.is_set():
+                        stopped = True
+                        break
+                    n_ing, n_skip, n_fail = work([path], self.db_path)
+                    ingested += n_ing
+                    skipped += n_skip
+                    failed += n_fail
+                    label = "rebuilding" if rebuild else "importing"
+                    self.root.after(0, self.set_status, f"{label} {index}/{total}...")
+                self.root.after(0, self.finish_import, ingested, skipped, failed, stopped)
+            except Exception as error:
+                self.root.after(0, self.finish_error, str(error))
 
         threading.Thread(target=worker, daemon=True).start()
 
     def stop_work(self):
         self.stop_event.set()
         self.status_var.set("stopping after current archive...")
+
+    def finish_error(self, message):
+        self.busy = False
+        self.import_button.state(["!disabled"])
+        self.rebuild_button.state(["!disabled"])
+        self.stop_button.state(["disabled"])
+        self.status_var.set(f"failed: {message}")
 
     def set_status(self, text):
         self.status_var.set(text)

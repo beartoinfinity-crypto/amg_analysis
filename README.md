@@ -15,22 +15,31 @@ pip install -e .
 
 ## Concepts
 
-- **Archive** ??a daily `.tar.Z` file named `PROCESSED_YYYYMMDD_HHMM.tar.Z` or
+- **Archive** - a daily `.tar.Z` file named `PROCESSED_YYYYMMDD_HHMM.tar.Z` or
   `CORRUPTED_YYYYMMDD_HHMM.tar.Z`. Archives are immutable input; the toolkit
   never modifies them.
-- **Message** ??one raw Type B message per inner file (`.rcv` = processed,
+- **Message** - one raw Type B message per inner file (`.rcv` = processed,
   `.COR` = corrupted), named with its receipt timestamp under a station folder
   (e.g. `HKG/260607002540778.rcv`).
-- **Index** ??a SQLite database you create once and reuse (`--db PATH`).
+- **Index** - one SQLite database (`amg_messages.db` by default) holding all
+  parsed messages plus full-text search.
 
 ## Usage
 
 ### Quick start (GUI)
 
-Double-click `run.bat` (or run `python -m amg gui`). A window lists every
-`*.tar.Z` with its size and indexed/pending state; tick the ones to import
-(pending archives are pre-ticked) and press **Import selected**. Progress and
-the final summary appear in the window.
+Double-click `run.bat` (or run `python -m amg gui`). The window lists every
+`*.tar.Z` with its size and indexed/pending state.
+
+| Button | What it does |
+| --- | --- |
+| **Import selected** | imports the ticked archives only (pending ones are pre-ticked) |
+| **Full rebuild** | wipes the index and re-parses every archive from scratch - use after a parsing-rule change |
+| **Stop** | halts a running import/rebuild cleanly between archives |
+
+Progress shows per archive; the final summary appears in the status bar. If the
+database is open in DB Browser (or another program) you will see a clear
+"database is locked" message instead of silent failures - close it and retry.
 
 ### 1. Build the index
 
@@ -38,21 +47,22 @@ the final summary appear in the window.
 python -m amg ingest AMG_msg --db amg_messages.db
 ```
 
-To import just some archives from the command line:
+Import just some archives:
 
 ```console
 python -m amg ingest AMG_msg --db amg_messages.db --only PROCESSED_20260610_0025.tar.Z
 ```
 
 Ingest is incremental and idempotent: archives already recorded in the index
-are skipped, so re-run it whenever new daily archives arrive. Each run ends
-with a summary on stderr:
+(name + size match) are skipped, so re-run it whenever new daily archives
+arrive. Each run ends with a summary on stderr:
 
 ```
 ingest summary: 2 ingested, 64 skipped, 0 failed
 ```
 
-Exit codes: `0` clean, `3` some archives failed, `1` every archive failed.
+Exit codes: `0` clean, `3` some archives failed, `1` every archive failed
+(or the database was locked).
 
 ### 2. Search
 
@@ -68,8 +78,8 @@ python -m amg search --db amg_messages.db --type BSM --csv > bsm.csv
 
 | Filter | Meaning |
 | --- | --- |
-| `--type` | message keyword: MVT, MVA, CHG, BSM, PNL, CPM, SVC, ??(unknown bodies are typed OTHER) |
-| `--flight` | flight number parsed from movement-style lines, e.g. `CI5825` |
+| `--type` | message keyword: MVT, LDM, ADL, PNL, ... (unrecognised bodies are typed OTHER) |
+| `--flight` | flight number parsed from the info line, e.g. `CI5825` |
 | `--origin` / `--dest` | Type B origin/destination address, e.g. `HKGTSXH` |
 | `--status` | `processed` or `corrupted` |
 | `--from` / `--to` | received-at window; dates (`2026-06-07`) or timestamps |
@@ -103,11 +113,61 @@ python -m amg status --db amg_messages.db --archive-dir AMG_msg
 
 Lists every archive as `indexed` or `pending`.
 
+## How it works
+
+**One seam.** All behaviour is reachable through one entry point -
+`amg.cli.main(argv)` (and the GUI, which is a thin layer over the same core
+functions). Archives are treated as immutable inputs; every derived fact lives
+in the database so it can be recomputed at any time.
+
+**Ingest pipeline.** For each archive: system `tar` converts the compressed
+`.tar.Z` to an uncompressed stream in memory (~0.2s per archive), Python's
+`tarfile` walks the members, each inner file is decoded as latin-1 and parsed,
+and rows are inserted in one transaction per archive. A crash or failure
+therefore never leaves a half-imported archive behind.
+
+**Deduplication.** Two layers: (1) an archive whose name *and* file size are
+already recorded is skipped entirely; (2) a `UNIQUE (source_archive,
+source_file)` constraint with `INSERT OR IGNORE` makes message inserts safe no
+matter how often an archive is processed. Dedupe is by location, not content.
+
+**Envelope parsing.** Control characters of the Type B framing (`SOH`/`STX`/
+`ETX`) are stripped for matching but preserved in stored raw text. The first
+line that is a three-letter keyword (optionally followed by text) decides
+`msg_type`; the last dotted address line before it gives `origin`; the header
+line gives `priority`/`destination`.
+
+**Per-category info lines.** The line after the keyword carries flight details
+in different shapes per message family:
+
+| Category | Shape | Extracted |
+| --- | --- | --- |
+| MVT, DIV, old LDM | `FLIGHT/DD.REG.AIRPORT` | flight_number, aircraft_reg, flight_airport |
+| FWD | `FLIGHT/DD.AIRPORT...` | flight_number, flight_airport |
+| new LDM | `FLIGHT/DDMMM[YY].REG...` | flight_number, aircraft_reg, flight_date |
+| ASM | `FLIGHT/DDMMMYY ...` | flight_number, flight_date |
+| PNL, ADL, PAL, CAL, PSM | `FLIGHT/DDMMM AIRPORT [PARTn]` | flight_number, flight_date, flight_airport, part_number |
+| PTM | same, with from-to pair | flight_airport holds e.g. `SYXHKG` |
+
+**flight_date normalisation.** Stored as `YYYYMMDD`. When the message itself
+carries a year (`16MAY26`) that year wins; otherwise the year comes from the
+archive filename, with a wrap rule (a December date in a January archive
+belongs to the previous year). Day-only dates stay empty.
+
+**Full-text search.** An SQLite FTS5 index over raw text, rebuilt after any
+ingest that changed rows (guarded by an index/content count check so it can
+never go stale).
+
+**Browsing externally.** Open `amg_messages.db` in DB Browser for SQLite. Use
+the `messages_readable` view - identical columns plus `message_text`, which is
+raw text with framing bytes stripped for readable display.
+
 ## Development
 
 ```console
-python -m pytest              # fast unit suite (CLI seam only)
+python -m pytest               # fast unit suite (CLI seam only)
 python -m pytest -o addopts="" # full suite incl. real-corpus integration test
+python -m mypy amg             # type check
 ```
 
 Tests drive only the public CLI against fixture archives and assert on stdout,

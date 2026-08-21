@@ -293,6 +293,7 @@ def ingest_archive(archive_path, con):
 
 
 def ingest_archives(archive_paths, db_path):
+    _probe_writable(db_path)
     con = sqlite3.connect(db_path)
     con.executescript(SCHEMA)
     seen = dict(con.execute("SELECT name, size FROM archives"))
@@ -319,7 +320,21 @@ def ingest_archives(archive_paths, db_path):
     return ingested, skipped, failed
 
 
+def _probe_writable(db_path):
+    try:
+        con = sqlite3.connect(db_path, timeout=5.0)
+        con.execute("BEGIN IMMEDIATE")
+        con.commit()
+        con.close()
+    except sqlite3.OperationalError as error:
+        raise RuntimeError(
+            f"database {db_path} is locked - close DB Browser or any other"
+            " program using it, then try again"
+        ) from error
+
+
 def rebuild_archives(archive_paths, db_path):
+    _probe_writable(db_path)
     con = sqlite3.connect(db_path)
     con.executescript(SCHEMA)
     con.execute("DELETE FROM messages")
@@ -334,7 +349,11 @@ def cmd_ingest(args):
     if args.only:
         wanted = set(args.only)
         paths = [p for p in paths if p.name in wanted]
-    ingested, skipped, failed = ingest_archives(paths, Path(args.db))
+    try:
+        ingested, skipped, failed = ingest_archives(paths, Path(args.db))
+    except RuntimeError as error:
+        print(error, file=sys.stderr)
+        return 1
     print(
         f"ingest summary: {ingested} ingested, {skipped} skipped, {failed} failed",
         file=sys.stderr,
