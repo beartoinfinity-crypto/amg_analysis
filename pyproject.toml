@@ -1,0 +1,13 @@
+[project]
+name = "amg"
+version = "0.1.0"
+description = "Toolkit for managing SITA IATA Type B message archives"
+requires-python = ">=3.13"
+
+[project.scripts]
+amg = "amg.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = '-m "not integration"'
+markers = ["integration: touches the real archive corpus (slower); run with -m integration"]
