@@ -85,6 +85,33 @@ def test_real_type_b_control_character_framing_parses(tmp_path, make_archive):
     assert row == ("MVT", "QU", "HKGTSXH", "TYOXKJL", "JL0029", "JA872J")
 
 
+def test_ldm_inline_flight_on_keyword_line_parses(tmp_path, make_archive):
+    row = ingest_one(
+        tmp_path,
+        make_archive,
+        "\r\n\x01QU HKGTSXH\r\n"
+        ".TYOOZNH 070132\r\n"
+        "\x02LDM NH0813/08.JA838A.42/198.2/8\r\n"
+        "SI\r\n"
+        "BW 141087 BI 39.5\r\n"
+        "\x03\r\n",
+    )
+    assert row == ("LDM", "QU", "HKGTSXH", "TYOOZNH", "NH0813", "JA838A")
+
+
+def test_unknown_three_letter_keyword_is_typed_with_flight(tmp_path, make_archive):
+    row = ingest_one(
+        tmp_path,
+        make_archive,
+        "\r\n\x01QU HKGTSXH\r\n"
+        ".HKGNHQS 080015\r\n"
+        "\x02ADL\r\n"
+        "NH0814/08.JA839A.42/C\r\n"
+        "\x03\r\n",
+    )
+    assert row == ("ADL", "QU", "HKGTSXH", "HKGNHQS", "NH0814", "JA839A")
+
+
 def test_soh_address_continuation_lines_still_find_origin(tmp_path, make_archive):
     row = ingest_one(
         tmp_path,

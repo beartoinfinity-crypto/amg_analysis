@@ -43,13 +43,8 @@ SELECT id, received_at, station, status, msg_type, priority, destination, origin
 FROM messages;
 """
 
-MESSAGE_TYPES = {
-    "MVT", "MVA", "MVD", "MVG", "CHG", "DLA",
-    "BSM", "BSR", "CPM", "UCM", "PNL", "PLN",
-    "ASM", "DSM", "SVC", "PTM", "TPM",
-}
-MOVEMENT_TYPES = {"MVT", "MVA", "MVD", "MVG", "CHG", "DLA"}
 FLIGHT_LINE = re.compile(r"^([A-Z0-9]{2,3}\d+[A-Z]?)/\d+\.([A-Z0-9]+)\.", re.ASCII)
+KEYWORD_LINE = re.compile(r"^([A-Z]{3})(?:\s+(.*))?$")
 
 
 def parse_received_at(stem):
@@ -83,10 +78,14 @@ def parse_envelope(raw_text):
     if len(priority_dest) == 2 and re.fullmatch(r"[A-Z]{2}", priority_dest[0]):
         priority, destination = priority_dest[0], priority_dest[1].strip()
 
-    keyword_index = next(
-        (i for i, line in enumerate(lines) if line.strip() in MESSAGE_TYPES), None
-    )
-    msg_type = lines[keyword_index].strip() if keyword_index is not None else "OTHER"
+    keyword_index = None
+    keyword_rest = None
+    msg_type = "OTHER"
+    for i, line in enumerate(lines):
+        match = KEYWORD_LINE.match(line.strip())
+        if match:
+            msg_type, keyword_index, keyword_rest = match.group(1), i, match.group(2)
+            break
 
     if keyword_index is not None:
         for line in reversed(lines[:keyword_index]):
@@ -95,9 +94,10 @@ def parse_envelope(raw_text):
                 break
 
     flight_number = aircraft_reg = None
-    if msg_type in MOVEMENT_TYPES and keyword_index is not None:
-        for line in lines[keyword_index + 1 :]:
-            match = FLIGHT_LINE.match(line)
+    if keyword_index is not None:
+        candidates = ([keyword_rest] if keyword_rest else []) + lines[keyword_index + 1 :]
+        for line in candidates:
+            match = FLIGHT_LINE.match(line.strip())
             if match:
                 flight_number, aircraft_reg = match.group(1), match.group(2)
                 break
