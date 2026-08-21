@@ -204,6 +204,23 @@ def test_adl_info_line_parses_flight_date_airport_and_part(tmp_path, make_archiv
     )
 
 
+def test_ptm_info_line_parses_city_pair_and_part(tmp_path, make_archive):
+    row = ingest_one(
+        tmp_path,
+        make_archive,
+        "\r\n\x01QD HKGTSXH\r\n"
+        ".PEKKMCA HB/301623\r\n"
+        "\x02PTM\r\n"
+        "UO251/30APR SYXHKG PART1\r\n"
+        "CX566/01 KIX 1K 1B12K MA/LI MS\r\n"
+        "\x03\r\n",
+    )
+    assert row == envelope(
+        "PTM", "QD", "HKGTSXH", "PEKKMCA", "UO251",
+        flight_airport="SYXHKG", flight_date="30APR", part_number=1,
+    )
+
+
 def test_flight_line_third_dot_segment_stores_airport(tmp_path, make_archive):
     row = ingest_one(
         tmp_path,
