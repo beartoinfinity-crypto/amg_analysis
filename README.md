@@ -164,6 +164,9 @@ raw text with framing bytes stripped for readable display.
 
 ## Development
 
+Internals, per-function logic, and development traps are documented in
+[docs/architecture.md](docs/architecture.md).
+
 ```console
 python -m pytest               # fast unit suite (CLI seam only)
 python -m pytest -o addopts="" # full suite incl. real-corpus integration test
