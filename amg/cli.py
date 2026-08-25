@@ -10,6 +10,8 @@ import tarfile
 from datetime import UTC, datetime, date, timedelta
 from pathlib import Path
 
+from amg import extractors
+
 MONTHS = {
     "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
     "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
@@ -65,6 +67,17 @@ CREATE TABLE IF NOT EXISTS archives (
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING
   fts5(raw_text, content='messages', content_rowid='id');
+CREATE TABLE IF NOT EXISTS message_facts (
+  message_id INTEGER PRIMARY KEY REFERENCES messages(id),
+  family TEXT NOT NULL,
+  facts_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS message_segments (
+  id INTEGER PRIMARY KEY,
+  message_id INTEGER NOT NULL REFERENCES messages(id),
+  seq INTEGER NOT NULL,
+  data_json TEXT NOT NULL
+);
 CREATE VIEW IF NOT EXISTS messages_readable AS
 SELECT id, received_at, station, status, msg_type, priority, destination, origin,
        flight_number, aircraft_reg, flight_airport, flight_date, part_number,
@@ -240,6 +253,8 @@ def ingest_archive(archive_path, con):
             f"tar failed on {archive_path.name}: {result.stderr.decode(errors='replace').strip()}"
         )
     rows = []
+    fact_rows = []
+    segment_rows = []
     with tarfile.open(fileobj=io.BytesIO(result.stdout), mode="r:") as tar:
         for member in tar.getmembers():
             if not member.isfile():
@@ -248,9 +263,12 @@ def ingest_archive(archive_path, con):
             station = posixpath.dirname(rel) or "-"
             stem, suffix = posixpath.splitext(posixpath.basename(rel))
             parse_error = None
+            extraction = None
             try:
-                raw = tar.extractfile(member).read().decode("latin-1")
-                envelope = parse_envelope(raw)
+                original = tar.extractfile(member).read().decode("latin-1")
+                envelope = parse_envelope(original)
+                extraction = extractors.extract_message(envelope["msg_type"], original)
+                raw = extractors.redact_text(envelope["msg_type"], original) or original
             except Exception as error:
                 raw = ""
                 envelope = {"msg_type": "OTHER", "priority": None, "destination": None,
@@ -258,6 +276,10 @@ def ingest_archive(archive_path, con):
                             "flight_airport": None, "flight_date": None,
                             "part_number": None}
                 parse_error = f"{type(error).__name__}: {error}"
+            if extraction:
+                fact_rows.append((rel, extraction["family"],
+                                  extractors.dumps(extraction["facts"]),
+                                  extraction["segments"]))
             rows.append(
                 (
                     parse_received_at(stem),
@@ -286,6 +308,30 @@ def ingest_archive(archive_path, con):
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
+    if fact_rows:
+        id_by_file = dict(con.execute(
+            "SELECT source_file, id FROM messages WHERE source_archive = ?",
+            (archive_path.name,),
+        ))
+        fact_values = []
+        segment_values = []
+        for rel, family, facts_json, segments in fact_rows:
+            message_id = id_by_file.get(rel)
+            if message_id is None:
+                continue
+            fact_values.append((message_id, family, facts_json))
+            for seq, data in enumerate(segments):
+                segment_values.append((message_id, seq, extractors.dumps(data)))
+        con.executemany(
+            "INSERT OR REPLACE INTO message_facts (message_id, family, facts_json)"
+            " VALUES (?, ?, ?)",
+            fact_values,
+        )
+        con.executemany(
+            "INSERT INTO message_segments (message_id, seq, data_json)"
+            " VALUES (?, ?, ?)",
+            segment_values,
+        )
     con.execute(
         "INSERT OR REPLACE INTO archives (name, size, ingested_at) VALUES (?, ?, ?)",
         (archive_path.name, archive_path.stat().st_size, datetime.now(UTC).isoformat()),

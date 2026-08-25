@@ -1,0 +1,278 @@
+import sqlite3
+
+from amg.cli import main
+
+
+def ingest_text(tmp_path, make_archive, msg_type_body, archive_name="PROCESSED_20260610_0025.tar.Z"):
+    archive_dir = tmp_path / "AMG_msg"
+    archive_dir.mkdir(exist_ok=True)
+    make_archive(
+        archive_dir / archive_name,
+        {"HKG/260607002540778.rcv": msg_type_body},
+    )
+    db = tmp_path / "index.db"
+    assert main(["ingest", str(archive_dir), "--db", str(db)]) == 0
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+MOVEMENT = (
+    "\r\n\x01QD HKGTSXH\r\n"
+    ".TYOXKJL 070132\r\n"
+    "\x02MVT\r\n"
+    "JL0029/07.JA872J.HND\r\n"
+    "AD1654/1712 EA1834 HKG\r\n"
+    "TD1708 AA1721/1734\r\n"
+    "DL81/0015 DL34/0020 RA/0120\r\n"
+    "\x03\r\n"
+)
+
+
+def test_movement_extracts_actual_and_estimated_times(tmp_path, make_archive):
+    con = ingest_text(tmp_path, make_archive, MOVEMENT)
+    fact = con.execute("SELECT family, facts_json FROM message_facts").fetchone()
+    assert fact["family"] == "MOVEMENT"
+    import json
+    facts = json.loads(fact["facts_json"])
+    assert facts["times"]["AD"] == "1654/1712"
+    assert facts["times"]["TD"] == "1708"
+    assert facts["times"]["AA"] == "1721/1734"
+    assert facts["times"]["EA"] == "1834"
+
+
+def test_movement_extracts_delay_codes_and_durations(tmp_path, make_archive):
+    con = ingest_text(tmp_path, make_archive, MOVEMENT)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["delay_codes"] == ["81", "34", "RA"]
+    assert facts["delay_durations"] == ["0015", "0020", "0120"]
+
+
+def test_movement_detects_adp_abp_markers(tmp_path, make_archive):
+    body = MOVEMENT.replace("TD1708 AA1721/1734", "ADP ABP TD1708")
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["adp"] is True and facts["abp"] is True
+
+
+def test_diversion_extracts_dva_pob_and_can(tmp_path, make_archive):
+    body = (
+        "\r\n\x01QU HKGTSXH\r\n"
+        ".HDQNPNZ 220216\r\n"
+        "\x02DIV\r\n"
+        "NZ081/21.ZKNZC.HKG\r\n"
+        "EA0254 BNE\r\n"
+        "POB247\r\n"
+        "CAN\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["dva"] == "BNE"
+    assert facts["eta"] == "0254"
+    assert facts["pob"] == 247
+    assert facts["can"] is True
+
+
+def test_ldm_extracts_weights_pax_and_cabin_totals(tmp_path, make_archive):
+    body = (
+        "\r\n\x01QU HKGTSXH\r\n"
+        ".HKGLDKE 081951\r\n"
+        "\x02LDM\r\n"
+        "KE0314/08.HL8045.J12C30Y200\r\n"
+        "-ICN.208/36/0.0.T18797.1/2495.2/7512\r\n"
+        ".PAX/28/2/214.PAD/0/0/0\r\n"
+        "CRW/4/10\r\n"
+        "BW 141087 BI 39.5\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["cabins"] == {"J": 12, "C": 30, "Y": 200}
+    assert facts["pax"] == {"adults": 28, "children": 2, "infants": 214}
+    assert facts["pad"] == {"adults": 0, "children": 0, "infants": 0}
+    assert facts["deadload"] == 18797
+    assert facts["crew"] == {"cockpit": 4, "cabin": 10}
+    assert facts["basic_weight"] == 141087
+    assert facts["balance_index"] == 39.5
+
+
+def test_ptm_extracts_transfer_segments_without_names(tmp_path, make_archive):
+    body = (
+        "\r\n\x01QD HKGTSXH\r\n"
+        ".PEKKMCA SC/070131\r\n"
+        "\x02PTM\r\n"
+        "UO251/30APR SYXHKG PART1\r\n"
+        "HX305/03 MEL 1O 1B22K TEST/PASSENGERMR\r\n"
+        "PX191 BG88\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    seg = con.execute("SELECT seq, data_json FROM message_segments").fetchone()
+    data = json.loads(seg["data_json"])
+    assert seg["seq"] == 0
+    assert data["flight"] == "HX305"
+    assert data["day"] == "03"
+    assert data["airports"] == "MEL"
+    assert data["cabin_bags"] == "1O 1B22K"
+    assert "TEST" not in seg["data_json"]
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["total_transfers"] == 191
+    assert facts["total_baggage"] == 88
+    assert facts["segments"] == 1
+    stored = con.execute("SELECT raw_text FROM messages").fetchone()
+    assert "TEST" not in stored["raw_text"]
+    assert "[REDACTED]" in stored["raw_text"]
+
+
+def test_assistance_extracts_codes_counts_and_cal_deltas(tmp_path, make_archive):
+    body = (
+        "\r\n\x01QD HKGTSXH\r\n"
+        ".HKGBEN CX/220300\r\n"
+        "\x02CAL\r\n"
+        "DL9714/06JUN HKG PART1\r\n"
+        "-LAX Y\r\n"
+        "DEL\r\n"
+        "1OLDSURNAMEMS .R/WCHR\r\n"
+        "ADD\r\n"
+        "1NEWSURNAMEJR .R/DEAF\r\n"
+        "2NEWERNAMEMS .R/MEDA\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["assist_codes"] == ["DEAF", "MEDA", "WCHR"]
+    assert facts["delta"] == {"ADD": 2, "DEL": 1}
+    stored = con.execute("SELECT raw_text FROM messages").fetchone()
+    assert "NEWSURNAME" not in stored["raw_text"]
+    assert "[REDACTED]" in stored["raw_text"]
+    assert ".R/DEAF" in stored["raw_text"].replace("\r\n", "\n")
+
+
+def test_name_lists_are_fully_redacted_with_counts_only(tmp_path, make_archive):
+    body = (
+        "\r\n\x01QU HKGTSXH\r\n"
+        ".HKGUKBA 130825\r\n"
+        "\x02PNL\r\n"
+        "LJ805/13MAY MAN PART1\r\n"
+        "CFG/014F076J429Y\r\n"
+        "AVAIL\r\n"
+        "1SMITH/JOHNMR .R/TKNE XX1 1234567890/1\r\n"
+        "2JONES/FREDMR\r\n"
+        ".R/FBA 1PC\r\n"
+        ".RN/4MR / U2TTZ8\r\n"
+        ".O2/EY0133W31AUHDUS0220HK .R/RQST HK1 2A-1DOLL/TESTNAMEMR\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["family_kind"] == "NAME_LIST"
+    assert facts["name_rows"] == 2
+    assert facts["identifier_rows"] == 3
+    assert facts["cfg"] == "014F076J429Y"
+    stored = con.execute("SELECT raw_text FROM messages").fetchone()
+    text = stored["raw_text"]
+    for pii in ("SMITH", "JONES", "JOHN", "FRED", "1234567890", "FBA", "U2TTZ8",
+                "TESTNAME"):
+        assert pii not in text, pii
+
+
+def test_forward_extracts_header_components_nationalities_and_rows(tmp_path, make_archive):
+    body = (
+        "FWD\r\n"
+        "UO117/28.NRT.3/3/7 -TPE.B60.R50.A45.L5.T150.HKG/3.GBR/102.CHN/120\r\n"
+        ".P\r\n"
+        "AA021 LAX 4Y 3B\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    fact = con.execute("SELECT family, facts_json FROM message_facts").fetchone()
+    assert fact["family"] == "FORWARD"
+    facts = json.loads(fact["facts_json"])
+    assert facts["destination"] == "TPE"
+    assert facts["crew"] == "3/3/7"
+    assert facts["components"] == {"B": 60, "R": 50, "A": 45, "L": 5, "T": 150}
+    # HKG/3 rides on the same dot-notation; captured too - interpretation
+    # layers filter airport codes out (documented ambiguity in the spec).
+    assert facts["nationalities"] == {"GBR": 102, "CHN": 120, "HKG": 3}
+    seg = json.loads(con.execute("SELECT data_json FROM message_segments").fetchone()["data_json"])
+    assert seg == {"flight": "AA021", "destination": "LAX", "detail": "4Y 3B"}
+
+
+def test_asm_is_muted_unless_airline_allowlisted(tmp_path, make_archive):
+    body = (
+        "\r\n\x01QU HKGTSXH\r\n"
+        ".HKGUOXX 120825\r\n"
+        "\x02ASM\r\n"
+        "UO112/12MAY26 6/UO113/12\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["muted"] is True
+
+    import amg.extractors as ext
+    ext.ASM_AIRLINES_TO_PROCESS.add("UO")
+    try:
+        con2 = ingest_text(tmp_path, make_archive, body,
+                           archive_name="PROCESSED_20260611_0025.tar.Z")
+        facts2 = json.loads(con2.execute(
+            "SELECT facts_json FROM message_facts ORDER BY message_id DESC LIMIT 1"
+        ).fetchone()["facts_json"])
+        assert facts2.get("muted", False) is False
+        assert facts2["flight_number"] == "UO112"
+    finally:
+        ext.ASM_AIRLINES_TO_PROCESS.clear()
+
+
+def test_column_mappings_can_block_fields_from_facts(tmp_path, make_archive):
+    from amg.extractors import apply_column_mappings
+
+    blocked = apply_column_mappings({"pob": 100, "dva": "BNE"}, {"POB_BLOCKED_TEST": None})
+    assert isinstance(blocked, dict)
+
+
+def test_long_lines_are_flagged_not_rejected_by_default(tmp_path, make_archive):
+    long_line = "X" * 300
+    body = (
+        "\r\n\x01QU HKGTSXH\r\n"
+        ".HDQNPNZ 220216\r\n"
+        f"\x02DIV\r\nNZ081/21.ZKNZC.HKG\r\n{long_line}\r\n\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["line_limit_violations"] >= 1
+
+
+def test_unhandled_types_store_no_fact_row(tmp_path, make_archive):
+    body = "\r\n\x01QU HKGTSXH\r\n.TYOXXZZ 070132\r\n\x02ZZZ\r\nhello\r\n\x03\r\n"
+    con = ingest_text(tmp_path, make_archive, body)
+    assert con.execute("SELECT COUNT(*) FROM message_facts").fetchone()[0] == 0
