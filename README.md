@@ -164,7 +164,9 @@ raw text with framing bytes stripped for readable display.
 
 ## Development
 
-Internals, per-function logic, and development traps are documented in
+Ready-to-paste SQL for every message type lives in
+[docs/query-cookbook.md](docs/query-cookbook.md). Internals, per-function
+logic, and development traps are documented in
 [docs/architecture.md](docs/architecture.md).
 
 ```console

@@ -552,6 +552,72 @@ def test_ahm780_px_line_extracts_transit_local_and_total(tmp_path, make_archive)
     assert facts2["pax"] == {"transit": 30, "disembarking": 185, "total": 215}
 
 
+def test_ahm780_si_block_extracts_fuel_weights_and_eet(tmp_path, make_archive):
+    body = (
+        "\r\n\x01QD HKGTSXH\r\n"
+        ".HKGODCI 061625\r\n"
+        "\x02MVT\r\n"
+        "CI5825/06.B18778.HKG\r\n"
+        "AA1612/1624\r\n"
+        "SI\r\n"
+        "PN0401 EET0122 BO23286 TOF62161 PL137063 LIZFW49.7 ZFW449049\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    si = facts["si"]
+    assert si["eet"] == "0122"
+    assert si["burn_off"] == 23286
+    assert si["takeoff_fuel"] == 62161
+    assert si["payload"] == 137063
+    assert si["zfw"] == 449049
+
+
+def test_ahm780_si_inline_line_extracts_fuel_remaining(tmp_path, make_archive):
+    body = (
+        "\r\n\x01QU HKGTSXH\r\n"
+        ".HKGRCCI 082010\r\n"
+        "\x02MVT\r\n"
+        "VJ986/22.VN-A544.PQC\r\n"
+        "AD0521/0528 EA0828 HKG\r\n"
+        "SI DOOR CLSD 0455\r\n"
+        "SI CHOCK OFF 0456\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    si = facts["si"]
+    assert si["events"] == [
+        {"label": "DOOR CLSD", "time": "0455"},
+        {"label": "CHOCK OFF", "time": "0456"},
+    ]
+
+
+def test_ahm780_si_spaced_value_form(tmp_path, make_archive):
+    body = (
+        "\r\n\x01QU HKGTSXH\r\n"
+        ".HKGRCCI 082010\r\n"
+        "\x02MVT\r\n"
+        "CI5825/06.B18778.HKG\r\n"
+        "AA1612/1624\r\n"
+        "SI\r\n"
+        "FR 50500\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["si"]["fuel_remaining"] == 50500
+
+
 def test_unhandled_types_store_no_fact_row(tmp_path, make_archive):
     body = "\r\n\x01QU HKGTSXH\r\n.TYOXXZZ 070132\r\n\x02ZZZ\r\nhello\r\n\x03\r\n"
     con = ingest_text(tmp_path, make_archive, body)

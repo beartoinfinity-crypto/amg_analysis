@@ -176,6 +176,70 @@ def _delay_slots(raw_text):
     return slots
 
 
+SI_VALUE_KEYS = {
+    "FR": "fuel_remaining", "EET": "eet", "BO": "burn_off",
+    "TOF": "takeoff_fuel", "PL": "payload", "ZFW": "zfw",
+}
+EVENT_TIME_RE = re.compile(r"^\d{4}$")
+SI_MARKER_RE = re.compile(r"^SI\b")
+
+
+def _si_value(text):
+    if re.fullmatch(r"\d+", text):
+        if len(text) > 1 and text.startswith("0"):
+            return text
+        return int(text)
+    if re.fullmatch(r"\d+\.\d+", text):
+        return float(text)
+    return text
+
+
+def _absorb_si_tokens(tokens, si, events):
+    i = 0
+    matched_any = False
+    while i < len(tokens):
+        token = tokens[i]
+        for key, name in SI_VALUE_KEYS.items():
+            if token == key and i + 1 < len(tokens):
+                si[name] = _si_value(tokens[i + 1])
+                i += 1
+                matched_any = True
+                break
+            if token.startswith(key) and len(token) > len(key) and not token.isalpha():
+                si[name] = _si_value(token[len(key):])
+                matched_any = True
+                break
+        i += 1
+    if not matched_any and tokens and EVENT_TIME_RE.match(tokens[-1]):
+        label = " ".join(tokens[:-1])
+        if label:
+            events.append({"label": label, "time": tokens[-1]})
+
+
+def _si_section(raw_text):
+    si, events = {}, []
+    collecting = False
+    for line in validate_lines(raw_text):
+        stripped = line.strip()
+        if SI_MARKER_RE.match(stripped):
+            collecting = True
+            rest = stripped[2:].strip()
+            if rest:
+                _absorb_si_tokens(rest.split(), si, events)
+            continue
+        if not stripped:
+            collecting = False
+            continue
+        if collecting:
+            if stripped.startswith("\x03") or stripped.startswith("END"):
+                collecting = False
+                continue
+            _absorb_si_tokens(stripped.split(), si, events)
+    if events:
+        si["events"] = events
+    return si
+
+
 def extract_movement(raw_text):
     tokens_set = set(raw_text.replace("\r\n", " ").split())
     times, destination = _times(raw_text)
@@ -186,6 +250,9 @@ def extract_movement(raw_text):
     }
     if destination:
         facts["destination"] = destination
+    si = _si_section(raw_text)
+    if si:
+        facts["si"] = si
     slots = _delay_slots(raw_text)
     if slots:
         facts["delays"] = slots
