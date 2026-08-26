@@ -35,10 +35,12 @@ def test_movement_extracts_actual_and_estimated_times(tmp_path, make_archive):
     assert fact["family"] == "MOVEMENT"
     import json
     facts = json.loads(fact["facts_json"])
-    assert facts["times"]["AD"] == "1654/1712"
-    assert facts["times"]["TD"] == "1708"
-    assert facts["times"]["AA"] == "1721/1734"
-    assert facts["times"]["EA"] == "1834"
+    assert facts["times"]["AD"] == {"time": "1654", "date": None}
+    assert facts["times"]["EO"] == {"time": "1712", "date": None}
+    assert facts["times"]["EL"] == {"time": "1834", "date": None}
+    assert facts["times"]["TD"] == {"time": "1708", "date": None}
+    # explicit TD token wins; AA pair degrades to its on-blocks time
+    assert facts["times"]["AA"] == {"time": "1734", "date": None}
 
 
 def test_movement_extracts_delay_codes_and_durations(tmp_path, make_archive):
@@ -431,6 +433,123 @@ def test_fwd_month_end_wrap_uses_forward_window(tmp_path, make_archive):
         "SELECT flight_date FROM messages WHERE msg_type='FWD'"
     ).fetchone()
     assert row["flight_date"] == "20260202"
+
+
+def test_ahm780_departure_message_maps_ad_eo_el_and_destination(tmp_path, make_archive):
+    body = (
+        "\r\nQD HKGTSXH\r\n"
+        ".HKGRCCI 082010\r\n"
+        "\x02MVT\r\n"
+        "CI5836/08.B18780.HKG\r\n"
+        "AD1939/2009 EA2122 TPE\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["times"]["AD"] == {"time": "1939", "date": None}
+    assert facts["times"]["EO"] == {"time": "2009", "date": None}
+    assert facts["times"]["EL"] == {"time": "2122", "date": None}
+    assert facts["destination"] == "TPE"
+
+
+def test_ahm780_arrival_line_splits_touchdown_and_onblocks(tmp_path, make_archive):
+    body = (
+        "\r\nQD HKGTSXH\r\n"
+        ".HKGRCCI 082010\r\n"
+        "\x02MVT\r\n"
+        "CI5836/08.B18780.HKG\r\n"
+        "AD1939/2009 EA2122 TPE\r\n"
+        "TD2205 AA2221\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["times"]["TD"] == {"time": "2205", "date": None}
+    assert facts["times"]["AA"] == {"time": "2221", "date": None}
+
+
+def test_ahm780_six_digit_times_carry_date_component(tmp_path, make_archive):
+    body = (
+        "\r\n\x01QU HKGTSXH\r\n"
+        ".TYOXKJL 070132\r\n"
+        "\x02MVT\r\n"
+        "JL0029/07.JA872J.HND\r\n"
+        "AD070110/070132 EA070527 HKG\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["times"]["AD"] == {"time": "0110", "date": "07"}
+    assert facts["times"]["EO"] == {"time": "0132", "date": "07"}
+    assert facts["times"]["EL"] == {"time": "0527", "date": "07"}
+    assert facts["destination"] == "HKG"
+
+
+def test_ahm780_edl_and_dla_delay_lines_fill_secondary_slots(tmp_path, make_archive):
+    body = (
+        "\r\nQD HKGTSXH\r\n"
+        ".HKGRCCI 082010\r\n"
+        "\x02MVT\r\n"
+        "CI5836/08.B18780.HKG\r\n"
+        "AD1939/2009 EA2122 TPE\r\n"
+        "DL57/0015\r\n"
+        "EDL12/0030\r\n"
+        "DLA93//95/\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    delays = facts["delays"]
+    assert delays["IR1"] == "57" and delays["DL1"] == "0015"
+    assert delays["IR3"] == "12" and delays["DL3"] == "0030"
+    assert delays["IR5"] == "93" and delays["IR6"] == "95"
+
+
+def test_ahm780_px_line_extracts_transit_local_and_total(tmp_path, make_archive):
+    body = (
+        "\r\nQD HKGTSXH\r\n"
+        ".HKGRCCI 082010\r\n"
+        "\x02MVT\r\n"
+        "VJ986/22.VN-A544.PQC\r\n"
+        "AD0521/0528 EA0828 HKG\r\n"
+        "PAX215+0INF\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["pax"] == {"total": 215, "infants": 0}
+
+    body2 = (
+        "\r\nQD HKGTSXH\r\n"
+        ".HKGRCCI 082010\r\n"
+        "\x02MVA\r\n"
+        "CI5836/08.B18780.HKG\r\n"
+        "AD1939/2009 EA2122 TPE\r\n"
+        "PX30/185\r\n"
+        "\x03\r\n"
+    )
+    con2 = ingest_text(tmp_path, make_archive, body2,
+                       archive_name="PROCESSED_20260611_0025.tar.Z")
+    facts2 = json.loads(
+        con2.execute("SELECT facts_json FROM message_facts ORDER BY message_id DESC LIMIT 1")
+        .fetchone()["facts_json"]
+    )
+    assert facts2["pax"] == {"transit": 30, "disembarking": 185, "total": 215}
 
 
 def test_unhandled_types_store_no_fact_row(tmp_path, make_archive):

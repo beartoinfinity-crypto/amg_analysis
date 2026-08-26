@@ -18,9 +18,12 @@ LINE_LIMIT = 64
 STRICT_LINE_VALIDATION = False
 
 TIMES_RE = re.compile(
-    r"(?<![A-Z0-9])(AD|AB|TD|AA|ED|EA|EL|EO|EAN|EDP)(\d{4}|\d{6})(?:/(\d{4}|\d{6}))?(?![0-9])"
+    r"(?<![A-Z0-9])(AD|AB|TD|AA|ED|EA|EL|EO|EAN|EDP|EB|RA)(\d{6}|\d{4})(?:/(\d{6}|\d{4}))?(?![0-9])"
 )
-DELAY_LINE_RE = re.compile(r"^DL[ /](.+)$")
+PX_SLASH_RE = re.compile(r"(?<![A-Z0-9])PX(\d+)/(\d+)(?![0-9])")
+PAX_TOTAL_RE = re.compile(r"\bPA?X(\d+)(?:\+(\d+)\s*INF)?", re.IGNORECASE)
+DEST_TOKEN_RE = re.compile(r"^[A-Z]{3}$")
+DELAY_SLOT_RE = re.compile(r"\d{1,2}")
 DVA_ETA_RE = re.compile(r"^E[A-Z]?(\d{4})\s+([A-Z]{3})\s*$", re.MULTILINE)
 CAN_RE = re.compile(r"(?<![A-Z])CAN(?![A-Z])")
 POB_RE = re.compile(r"\bPOB(\d+)\b", re.IGNORECASE)
@@ -85,40 +88,123 @@ def count_line_violations(raw_text):
     return sum(1 for line in validate_lines(raw_text) if len(line) > LINE_LIMIT)
 
 
-def _times(text):
+TIME_CODE_MAP = {
+    "AD": "AD", "AB": "AB", "TD": "TD", "AA": "AA",
+    "EO": "EO", "EA": "EL", "EL": "EL", "RA": "RA",
+    "EB": "EA", "ED": "ED", "EAN": "EAN", "EDP": "EDP",
+}
+
+
+def _split_time(value):
+    if len(value) == 6:
+        return {"time": value[2:], "date": value[:2]}
+    return {"time": value, "date": None}
+
+
+def _times(raw_text):
+    """AHM 780 mapping: an AD pair is AD(off-blocks)+EO(airborne); an EA token
+    maps to EL(estimated landing); an EB token maps to EA(estimated
+    on-blocks); an AA pair is TD(touchdown)+AA(on-blocks); a 6-digit group is
+    DDHHMM so date rides along."""
     times = {}
-    for code, first, second in TIMES_RE.findall(text):
-        times[code] = f"{first}/{second}" if second else first
-    return times
+    destination = None
+    for line in validate_lines(raw_text):
+        tokens = line.split()
+        for index, token in enumerate(tokens):
+            match = TIMES_RE.match(token)
+            if not match:
+                continue
+            raw_code, first, second = match.group(1), match.group(2), match.group(3)
+            code = TIME_CODE_MAP[raw_code]
+            if raw_code == "AA" and second:
+                if "TD" not in times:
+                    times["TD"] = _split_time(first)
+                times["AA"] = _split_time(second)
+                continue
+            times[code] = _split_time(first)
+            if second and raw_code == "AD":
+                times["EO"] = _split_time(second)
+        if destination is None:
+            for i in range(len(tokens) - 1):
+                m = TIMES_RE.match(tokens[i])
+                if (m and TIME_CODE_MAP[m.group(1)] in ("EL", "RA")
+                        and DEST_TOKEN_RE.match(tokens[i + 1])):
+                    destination = tokens[i + 1]
+                    break
+    return times, destination
 
 
-def _delays(text):
-    codes, durations = [], []
-    for line in validate_lines(text):
+def _delay_slots(raw_text):
+    """DL line fills IR1/DL1.., EDL line continues at IR3/DL3.., DLA adds
+    reason codes only at IR5+. Within a line, slash-groups alternate
+    reason-code then duration."""
+    slots = {}
+    base_for = {"DL": 1, "EDL": 3}
+    dla_codes = []
+    for line in validate_lines(raw_text):
         stripped = line.strip()
-        if not stripped.startswith("DL") or len(stripped) <= 2:
+        if stripped.startswith("DLA"):
+            dla_codes.extend(p for p in stripped[3:].split("/") if p)
             continue
-        for token in stripped[2:].split():
+        prefix = "EDL" if stripped.startswith("EDL") else (
+            "DL" if stripped.startswith("DL") else None)
+        if prefix is None:
+            continue
+        ordered = []
+        for token in stripped[len(prefix):].split():
             parts = [re.sub(r"^DL", "", p) for p in token.split("/") if p]
-            if len(parts) >= 2:
-                codes.append(parts[0])
-                durations.append(parts[1])
-            elif parts:
-                value = parts[0]
-                (durations if value.isdigit() and len(value) >= 3 else codes).append(value)
-    return codes[:8], durations[:4]
+            for position, part in enumerate(parts):
+                ordered.append(("DL" if position % 2 else "IR", part))
+        ir_next = dl_next = base_for[prefix]
+        for role, value in ordered:
+            if role == "IR":
+                while ir_next <= 8 and f"IR{ir_next}" in slots:
+                    ir_next += 1
+                if ir_next > 8:
+                    continue
+                slots[f"IR{ir_next}"] = value
+                ir_next += 1
+            else:
+                while dl_next <= 8 and f"DL{dl_next}" in slots:
+                    dl_next += 1
+                if dl_next > 8:
+                    continue
+                slots[f"DL{dl_next}"] = value.zfill(4)
+                dl_next += 1
+    for offset, code in enumerate(dla_codes[:4]):
+        slots[f"IR{5 + offset}"] = code
+    return slots
 
 
 def extract_movement(raw_text):
-    tokens = set(raw_text.replace("\r\n", " ").split())
+    tokens_set = set(raw_text.replace("\r\n", " ").split())
+    times, destination = _times(raw_text)
     facts = {
-        "times": _times(raw_text),
-        "adp": "ADP" in tokens,
-        "abp": "ABP" in tokens,
+        "times": times,
+        "adp": "ADP" in tokens_set,
+        "abp": "ABP" in tokens_set,
     }
-    codes, durations = _delays(raw_text)
-    facts["delay_codes"] = codes
-    facts["delay_durations"] = durations
+    if destination:
+        facts["destination"] = destination
+    slots = _delay_slots(raw_text)
+    if slots:
+        facts["delays"] = slots
+        facts["delay_codes"] = [v for k, v in sorted(slots.items()) if k.startswith("IR")]
+        facts["delay_durations"] = [v for k, v in sorted(slots.items()) if k.startswith("DL")]
+    pax = {}
+    slash = PX_SLASH_RE.search(raw_text)
+    if slash:
+        pax["transit"] = int(slash.group(1))
+        pax["disembarking"] = int(slash.group(2))
+        pax["total"] = int(slash.group(1)) + int(slash.group(2))
+    else:
+        total = PAX_TOTAL_RE.search(raw_text)
+        if total:
+            pax["total"] = int(total.group(1))
+            if total.group(2):
+                pax["infants"] = int(total.group(2))
+    if pax:
+        facts["pax"] = pax
     return facts
 
 
