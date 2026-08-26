@@ -22,6 +22,14 @@ class ArchivePicker:
         ttk.Label(top, text=str(archive_dir), foreground="#555").pack(side="left", padx=6)
         ttk.Button(top, text="Refresh", command=self.refresh).pack(side="right")
 
+        guide = ttk.Label(
+            root, padding=(8, 0),
+            foreground="#555",
+            text="New archives: tick them (pending are pre-ticked) -> Import selected."
+                 "   |   Full rebuild ignores ticks: wipes and re-parses ALL archives.",
+        )
+        guide.pack(fill="x")
+
         columns = ("pick", "name", "size", "state")
         self.tree = ttk.Treeview(root, columns=columns, show="headings", selectmode="none")
         for col, text, width, anchor in (
@@ -38,10 +46,11 @@ class ArchivePicker:
         bottom = ttk.Frame(root, padding=8)
         bottom.pack(fill="x")
         self.select_all_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
+        self.select_all_cb = ttk.Checkbutton(
             bottom, text="Select all", variable=self.select_all_var,
             command=self.toggle_all,
-        ).pack(side="left")
+        )
+        self.select_all_cb.pack(side="left")
         self.import_button = ttk.Button(
             bottom, text="Import selected", command=self.start_import,
         )
@@ -103,7 +112,9 @@ class ArchivePicker:
             return
         paths = [self.archive_dir / name for name in names]
         if not messagebox.askyesno(
-            "Import", f"Import {len(paths)} archive(s)?"
+            "Import selected",
+            f"Import {len(paths)} selected archive(s)?\n"
+            "Already-indexed archives are skipped automatically.",
         ):
             return
         self.run_in_background(paths, rebuild=False)
@@ -111,14 +122,15 @@ class ArchivePicker:
     def start_rebuild(self):
         if self.busy:
             return
-        names = [item for item in self.tree.get_children()]
+        names = list(self.tree.get_children())
         if not names:
             self.status_var.set("no archives found")
             return
         if not messagebox.askyesno(
             "Full rebuild",
-            f"Re-parse all {len(names)} archives from scratch?\n"
-            "The current index contents will be replaced (this takes a few minutes).",
+            f"Re-parse ALL {len(names)} archives from scratch?\n"
+            "Your tick-selection is ignored - every archive is rebuilt.\n"
+            "Existing parsed data is replaced (about 1-2 minutes).",
         ):
             return
         paths = [self.archive_dir / name for name in names]
@@ -129,25 +141,31 @@ class ArchivePicker:
         self.stop_event.clear()
         self.import_button.state(["disabled"])
         self.rebuild_button.state(["disabled"])
+        self.select_all_cb.state(["disabled"])
         self.stop_button.state(["!disabled"])
-        total = len(paths)
         work = rebuild_archives if rebuild else ingest_archives
+        label = "rebuilding" if rebuild else "importing"
+
+        def progress(done, total, ingested, failed):
+            self.root.after(
+                0, self.set_status,
+                f"{label} {done}/{total} - {ingested} imported, {failed} failed",
+            )
+
+        def should_stop():
+            return self.stop_event.is_set()
 
         def worker():
             try:
-                ingested = skipped = failed = 0
-                stopped = False
-                for index, path in enumerate(paths, start=1):
-                    if self.stop_event.is_set():
-                        stopped = True
-                        break
-                    n_ing, n_skip, n_fail = work([path], self.db_path)
-                    ingested += n_ing
-                    skipped += n_skip
-                    failed += n_fail
-                    label = "rebuilding" if rebuild else "importing"
-                    self.root.after(0, self.set_status, f"{label} {index}/{total}...")
-                self.root.after(0, self.finish_import, ingested, skipped, failed, stopped)
+                ingested, skipped, failed = work(
+                    paths, self.db_path,
+                    progress=lambda done, total, ing, skip, fail:
+                        progress(done, total, ing, fail),
+                    should_stop=should_stop,
+                )
+                stopped = self.stop_event.is_set()
+                self.root.after(0, self.finish_import,
+                                ingested, skipped, failed, stopped)
             except Exception as error:
                 self.root.after(0, self.finish_error, str(error))
 
@@ -157,11 +175,15 @@ class ArchivePicker:
         self.stop_event.set()
         self.status_var.set("stopping after current archive...")
 
+    def _set_busy(self, busy):
+        state = ["disabled"] if busy else ["!disabled"]
+        self.import_button.state(state)
+        self.rebuild_button.state(state)
+        self.select_all_cb.state(state)
+        self.stop_button.state(["!disabled" if busy else "disabled"])
+
     def finish_error(self, message):
-        self.busy = False
-        self.import_button.state(["!disabled"])
-        self.rebuild_button.state(["!disabled"])
-        self.stop_button.state(["disabled"])
+        self._set_busy(False)
         self.status_var.set(f"failed: {message}")
 
     def set_status(self, text):
@@ -169,9 +191,7 @@ class ArchivePicker:
 
     def finish_import(self, ingested, skipped, failed, stopped=False):
         self.busy = False
-        self.import_button.state(["!disabled"])
-        self.rebuild_button.state(["!disabled"])
-        self.stop_button.state(["disabled"])
+        self._set_busy(False)
         self.refresh()
         prefix = "stopped" if stopped else "done"
         self.status_var.set(

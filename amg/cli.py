@@ -364,24 +364,31 @@ def ingest_archive(archive_path, con):
     )
 
 
-def ingest_archives(archive_paths, db_path):
+def ingest_archives(archive_paths, db_path, progress=None, should_stop=None):
     _probe_writable(db_path)
     con = sqlite3.connect(db_path)
     con.executescript(SCHEMA)
     seen = dict(con.execute("SELECT name, size FROM archives"))
     ingested = skipped = failed = 0
+    done = 0
+    total = len(archive_paths)
     for archive_path in archive_paths:
+        if should_stop and should_stop():
+            break
         if seen.get(archive_path.name) == archive_path.stat().st_size:
             skipped += 1
-            continue
-        try:
-            ingest_archive(archive_path, con)
-            con.commit()
-            ingested += 1
-        except Exception as error:
-            con.rollback()
-            print(f"failed to ingest {archive_path.name}: {error}", file=sys.stderr)
-            failed += 1
+        else:
+            try:
+                ingest_archive(archive_path, con)
+                con.commit()
+                ingested += 1
+            except Exception as error:
+                con.rollback()
+                print(f"failed to ingest {archive_path.name}: {error}", file=sys.stderr)
+                failed += 1
+        done += 1
+        if progress:
+            progress(done, total, ingested, skipped, failed)
     fts_stale = con.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0] != con.execute(
         "SELECT COUNT(*) FROM messages"
     ).fetchone()[0]
@@ -405,7 +412,7 @@ def _probe_writable(db_path):
         ) from error
 
 
-def rebuild_archives(archive_paths, db_path):
+def rebuild_archives(archive_paths, db_path, progress=None, should_stop=None):
     _probe_writable(db_path)
     con = sqlite3.connect(db_path)
     con.executescript(SCHEMA)
@@ -413,7 +420,8 @@ def rebuild_archives(archive_paths, db_path):
     con.execute("DELETE FROM archives")
     con.commit()
     con.close()
-    return ingest_archives(archive_paths, db_path)
+    return ingest_archives(archive_paths, db_path, progress=progress,
+                           should_stop=should_stop)
 
 
 def cmd_ingest(args):

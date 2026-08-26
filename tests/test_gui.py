@@ -93,6 +93,36 @@ def test_rebuild_refuses_to_wipe_a_locked_database(tmp_path, make_archive):
     blocker.close()
 
 
+def test_rebuild_of_multiple_archives_keeps_all_data(tmp_path, make_archive):
+    archive_dir = make_two_archives(tmp_path, make_archive)
+    db = tmp_path / "index.db"
+    main(["ingest", str(archive_dir), "--db", str(db)])
+
+    ingested, skipped, failed = rebuild_archives(
+        sorted(archive_dir.glob("*.tar.Z")), db
+    )
+
+    assert (ingested, skipped, failed) == (2, 0, 0)
+    con = sqlite3.connect(db)
+    assert con.execute("SELECT COUNT(*) FROM archives").fetchone()[0] == 2
+    assert con.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 2
+
+
+def test_progress_and_stop_callbacks(tmp_path, make_archive):
+    archive_dir = make_two_archives(tmp_path, make_archive)
+    db = tmp_path / "index.db"
+
+    seen = []
+    result = rebuild_archives(
+        sorted(archive_dir.glob("*.tar.Z")), db,
+        progress=lambda done, total, ing, skip, fail: seen.append((done, total)),
+        should_stop=lambda: len(seen) >= 1,
+    )
+
+    assert result == (1, 0, 0)
+    assert seen[0] == (1, 2)
+
+
 def test_ingest_on_locked_database_fails_fast_with_clear_message(tmp_path, make_archive, capsys):
     archive_dir = make_two_archives(tmp_path, make_archive)
     db = tmp_path / "index.db"
