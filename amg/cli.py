@@ -32,13 +32,17 @@ def normalize_flight_date(flight_date, archive_name):
     if day_only:
         flight_day = date(year, month, int(day_only.group(1)))
         if flight_day < archive_day:
-            month += 1
-            year += (month - 1) // 12
-            month = (month - 1) % 12 + 1
-            try:
-                flight_day = date(year, month, int(day_only.group(1)))
-            except ValueError:
-                return None
+            import calendar
+            days_left_in_month = calendar.monthrange(year, month)[1] - archive_day.day
+            forward_window_days = 2
+            if days_left_in_month + int(day_only.group(1)) <= forward_window_days:
+                month += 1
+                year += (month - 1) // 12
+                month = (month - 1) % 12 + 1
+                try:
+                    flight_day = date(year, month, int(day_only.group(1)))
+                except ValueError:
+                    return None
         return f"{flight_day:%Y%m%d}"
     match = re.fullmatch(r"(\d{1,2})([A-Z]{3})(\d{2})?", flight_date)
     if not match or match.group(2) not in MONTHS:
