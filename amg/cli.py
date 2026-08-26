@@ -103,6 +103,9 @@ ASM_LINE = re.compile(
     r"^([A-Z0-9]{2,3}\d+[A-Z]?)/(\d{1,2}[A-Z]{3})(\d{2})(?:\s|$)", re.ASCII
 )
 KEYWORD_LINE = re.compile(r"^([A-Z]{3})(?:\s+(.*))?$")
+GLUED_KEYWORD_LINE = re.compile(
+    r"^(FWD|ASM|MVT|MVA|DIV|LDM|PTM|PNL|ADL|PSM|PAL|CAL)(\w+/\S.*)$"
+)
 
 
 def parse_received_at(stem):
@@ -200,7 +203,8 @@ def parse_envelope(raw_text):
     keyword_rest = None
     msg_type = "OTHER"
     for i, line in enumerate(lines):
-        match = KEYWORD_LINE.match(line.strip())
+        stripped = line.strip()
+        match = KEYWORD_LINE.match(stripped) or GLUED_KEYWORD_LINE.match(stripped)
         if match:
             msg_type, keyword_index, keyword_rest = match.group(1), i, match.group(2)
             break

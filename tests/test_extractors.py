@@ -218,7 +218,7 @@ def test_forward_extracts_header_components_nationalities_and_rows(tmp_path, mak
     # layers filter airport codes out (documented ambiguity in the spec).
     assert facts["nationalities"] == {"GBR": 102, "CHN": 120, "HKG": 3}
     seg = json.loads(con.execute("SELECT data_json FROM message_segments").fetchone()["data_json"])
-    assert seg == {"flight": "AA021", "destination": "LAX", "detail": "4Y 3B"}
+    assert seg == {"hop": "TPE", "flight": "AA021", "destination": "LAX", "detail": "4Y 3B"}
 
 
 def test_asm_is_muted_unless_airline_allowlisted(tmp_path, make_archive):
@@ -270,6 +270,106 @@ def test_long_lines_are_flagged_not_rejected_by_default(tmp_path, make_archive):
         con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
     )
     assert facts["line_limit_violations"] >= 1
+
+
+def test_fwd_dash_destination_on_its_own_line_is_captured(tmp_path, make_archive):
+    body = (
+        "FWD\r\n"
+        "MU725/28.HKG.3/3/7\r\n"
+        "-ICN.B30.R40.A25.L1.T350.HKG/2.GBR/10.CHN/120\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["crew"] == "3/3/7"
+    assert facts["destination"] == "ICN"
+    assert facts["components"] == {"B": 30, "R": 40, "A": 25, "L": 1, "T": 350}
+    assert facts["nationalities"] == {"GBR": 10, "CHN": 120, "HKG": 2}
+
+
+def test_fwd_collects_every_destination_block(tmp_path, make_archive):
+    body = (
+        "FWD\r\n"
+        "UO117/28.NRT.3/3/7 -TPE.B60.R50\r\n"
+        "-ICN.B10.R20\r\n"
+        ".P\r\n"
+        "AA021 HKG 1Y -HKG.B7.R8.A9.L2.T50.\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert [d["airport"] for d in facts["destinations"]] == ["TPE", "ICN", "HKG"]
+    assert facts["destinations"][2] == {
+        "airport": "HKG", "B": 7, "R": 8, "A": 9, "L": 2, "T": 50,
+    }
+    # multi-hop semantics: destination = LAST block (final arrival)
+    assert facts["destination"] == "HKG"
+
+
+MULTIHOP_FWD = (
+    "FWDZZ779/19.NRT.3/3/7\r\n"
+    "-TPE.B60.R50.A45.L5.T150.HKG/3.GBR/102.CHN/120\r\n"
+    ".P\r\n"
+    "AA021 LAX 4Y 3B\r\n"
+    "AA021 LAX 1Y 0B.SA\r\n"
+    "AA595 DTW 3Y INF1\r\n"
+    "AA665 SJU 1Y.CHD1.RQ\r\n"
+    "AC189S YUL 1F.RQ\r\n"
+    "TW219 CLE 5Y 3B\r\n"
+    "TW801 IAH 2Y 1B\r\n"
+    "UA015 LAX 4Y\r\n"
+    "AA021 HKG 1Y\r\n"
+    "-HKG.B30.R38.A32.L4.T250.TWN/3.HKG/52.JPN/120\r\n"
+    ".P\r\n"
+    "KQ709/N ITH 22Y 16B398K\r\n"
+    "KQ709/N ITH 2Y 1B29K.SA\r\n"
+    "XY311/S JFK 47Y 23B451K\r\n"
+    "-JFK.B33.R38.A14.T210.HKG/3.SIN/52.GBR/25\r\n"
+    ".P\r\n"
+    "CX219 CLE 5Y 3B\r\n"
+    "CX801 IAH 2Y 1B\r\n"
+    "-SIN.B23.R38.T290.HKG/3.SIN/85\r\n"
+    ".P\r\n"
+    "BA801 IAH 2Y 1B\r\n"
+    "BA015 LAX 4Y\r\n"
+    "BA021 HKG 1Y\r\n"
+    "-LHR.B16.R14.L9.T1500.HKG/5.USA/7.GBR/11\r\n"
+    ".P\r\n"
+    "NIL\r\n"
+    "ENDFWD\r\n"
+)
+
+
+def test_multihop_fwd_from_glued_keyword_is_fully_parsed(tmp_path, make_archive):
+    con = ingest_text(tmp_path, make_archive, MULTIHOP_FWD)
+    import json
+    row = con.execute(
+        "SELECT r.msg_type, r.flight_number, f.family, f.facts_json"
+        " FROM messages r JOIN message_facts f ON f.message_id = r.id"
+    ).fetchone()
+    assert row["msg_type"] == "FWD"
+    assert row["flight_number"] == "ZZ779"
+    facts = json.loads(row["facts_json"])
+    assert facts["crew"] == "3/3/7"
+    assert [d["airport"] for d in facts["destinations"]] == [
+        "TPE", "HKG", "JFK", "SIN", "LHR",
+    ]
+    assert facts["destination"] == "LHR"
+    assert facts["hops"] == 5
+    assert facts["nationalities"]["GBR"] == 102 + 25 + 11
+    segs = [json.loads(r[0]) for r in con.execute(
+        "SELECT data_json FROM message_segments ORDER BY seq"
+    )]
+    assert len(segs) == 17
+    assert segs[0]["hop"] == "TPE" and segs[0]["flight"] == "AA021"
+    assert segs[9]["hop"] == "HKG" and segs[9]["flight"] == "KQ709/N"
+    assert segs[-1]["hop"] == "SIN"
 
 
 def test_unhandled_types_store_no_fact_row(tmp_path, make_archive):

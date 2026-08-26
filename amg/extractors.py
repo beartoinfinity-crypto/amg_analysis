@@ -43,9 +43,10 @@ NAME_ROW_RE = re.compile(r"^\d[A-Z]")
 IDENTIFIER_ROW_RE = re.compile(r"^\.[A-Z][A-Z0-9]{0,2}/")
 CFG_RE = re.compile(r"CFG/([A-Z0-9/]+)")
 OP_MARKER_RE = re.compile(r"^(ADD|DEL|CHG)\s*$", re.MULTILINE)
-FWD_HEADER_RE = re.compile(
-    r"^([A-Z0-9]{2,3}\d+[A-Z]?)/\d+\.[A-Z]{3}\.(\d+/\d+/\d+)\s+-([A-Z]{3})"
+FWD_CREW_RE = re.compile(
+    r"^(?:FWD)?([A-Z0-9]{2,3}\d+[A-Z]?)/\d+\.[A-Z]{3}\.(\d+/\d+/\d+)", re.ASCII
 )
+FWD_DASH_DEST_RE = re.compile(r"-([A-Z]{3})((?:\.[BRLAT]\d+)+)")
 FWD_COMPONENT_RE = re.compile(r"\.([BRLAT])(\d+)(?![0-9])")
 NATIONALITY_RE = re.compile(r"(?<![A-Z0-9])([A-Z]{3})/(\d+)(?![0-9])")
 
@@ -250,20 +251,47 @@ def extract_name_list(raw_text):
 def extract_forward(raw_text):
     facts, segments = {}, []
     for line in validate_lines(raw_text):
-        header = FWD_HEADER_RE.match(line.strip())
+        header = FWD_CREW_RE.match(line.strip())
         if header:
             facts["crew"] = header.group(2)
-            facts["destination"] = header.group(3)
             break
-    components = {code: int(n) for code, n in FWD_COMPONENT_RE.findall(raw_text)}
-    if components:
-        facts["components"] = components
-    nationalities = {code: int(n) for code, n in NATIONALITY_RE.findall(raw_text)}
-    if nationalities:
-        facts["nationalities"] = nationalities
+
+    matches = list(FWD_DASH_DEST_RE.finditer(raw_text))
+    destinations = []
+    merged_nationalities = {}
+    first_components = None
+    for i, match in enumerate(matches):
+        airport = match.group(1)
+        components = {code: int(n) for code, n in FWD_COMPONENT_RE.findall(match.group(2))}
+        block = {"airport": airport, **components}
+        tail_end = matches[i + 1].start() if i + 1 < len(matches) else len(raw_text)
+        chunk = raw_text[match.end():tail_end]
+        nats = {code: int(n) for code, n in NATIONALITY_RE.findall(chunk)}
+        if nats:
+            block["nationalities"] = nats
+            for code, n in nats.items():
+                merged_nationalities[code] = merged_nationalities.get(code, 0) + n
+        destinations.append(block)
+        if first_components is None:
+            first_components = components
+    if destinations:
+        facts["destination"] = destinations[-1]["airport"]
+        facts["destinations"] = destinations
+        facts["hops"] = len(destinations)
+        facts["components"] = first_components
+    if merged_nationalities:
+        facts["nationalities"] = merged_nationalities
+
+    current_hop = None
     in_rows = False
     for line in validate_lines(raw_text):
         stripped = line.strip()
+        if stripped == "ENDFWD":
+            break
+        hop = FWD_DASH_DEST_RE.search(line)
+        if hop and not stripped.startswith("FWD"):
+            current_hop = hop.group(1)
+            continue
         if stripped == ".P":
             in_rows = True
             continue
@@ -271,6 +299,7 @@ def extract_forward(raw_text):
             tokens = stripped.split()
             if len(tokens) >= 3 and not tokens[0].startswith("."):
                 segments.append({
+                    "hop": current_hop,
                     "flight": tokens[0],
                     "destination": tokens[1],
                     "detail": " ".join(tokens[2:]),
