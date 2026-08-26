@@ -107,7 +107,7 @@ FROM messages;
 """
 
 FLIGHT_LINE = re.compile(
-    r"^([A-Z0-9]{2,3}\d+[A-Z]?)/(\d{1,2})\.([A-Z0-9]+)(?:\.([A-Z]{3}))?", re.ASCII
+    r"^([A-Z0-9]{2,3}\d+[A-Z]?)/(\d{1,2})\.([A-Z0-9-]+)(?:\.([A-Z]{3}))?", re.ASCII
 )
 PNL_LINE = re.compile(
     r"^([A-Z0-9]{2,3}\d+[A-Z]?)/(\d{1,2}[A-Z]{3})\s+([A-Z]{3}(?:[A-Z]{3})?)"
@@ -118,7 +118,7 @@ FWD_LINE = re.compile(
     r"^([A-Z0-9]{2,3}\d+[A-Z]?)/(\d{1,2})\.([A-Z]{3})(?![A-Z0-9])", re.ASCII
 )
 LDM_NEW_LINE = re.compile(
-    r"^([A-Z0-9]{2,3}\d+[A-Z]?)/(\d{1,2}[A-Z]{3})(\d{2})?\.([A-Z0-9]+)", re.ASCII
+    r"^([A-Z0-9]{2,3}\d+[A-Z]?)/(\d{1,2}[A-Z]{3})(\d{2})?\.([A-Z0-9-]+)", re.ASCII
 )
 ASM_LINE = re.compile(
     r"^([A-Z0-9]{2,3}\d+[A-Z]?)/(\d{1,2}[A-Z]{3})(\d{2})(?:\s|$)", re.ASCII

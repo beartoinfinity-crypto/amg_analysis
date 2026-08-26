@@ -323,6 +323,22 @@ def test_flight_line_third_dot_segment_stores_airport(tmp_path, make_archive):
                            "HKG", flight_date="20260612")
 
 
+def test_movement_registration_with_hyphen_keeps_airport(tmp_path, make_archive):
+    row = ingest_one(
+        tmp_path,
+        make_archive,
+        "\r\nQD HKGTSXH\r\n"
+        ".HKGRCCI 220520\r\n"
+        "\x02MVT\r\n"
+        "VJ986/22.VN-A544.PQC\r\n"
+        "AD0521/0528 EA0828 HKG\r\n"
+        "PAX215+0INF\r\n"
+        "\x03\r\n",
+    )
+    assert row == envelope("MVT", "QD", "HKGTSXH", "HKGRCCI", "VJ986", "VN-A544",
+                           "PQC", flight_date="20260622")
+
+
 def test_movement_day_only_date_resolves_like_user_example(tmp_path, make_archive):
     row = ingest_one(
         tmp_path,
