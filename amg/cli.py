@@ -22,18 +22,30 @@ ARCHIVE_DATE = re.compile(r"_(\d{4})(\d{2})(\d{2})_\d{4}\.tar\.Z$")
 def normalize_flight_date(flight_date, archive_name):
     if not flight_date:
         return None
+    day_only = re.fullmatch(r"(\d{1,2})", flight_date)
+    archive_match = ARCHIVE_DATE.search(archive_name)
+    if not archive_match:
+        return None
+    year = int(archive_match.group(1))
+    month = int(archive_match.group(2))
+    archive_day = date(year, month, int(archive_match.group(3)))
+    if day_only:
+        flight_day = date(year, month, int(day_only.group(1)))
+        if flight_day < archive_day:
+            month += 1
+            year += (month - 1) // 12
+            month = (month - 1) % 12 + 1
+            try:
+                flight_day = date(year, month, int(day_only.group(1)))
+            except ValueError:
+                return None
+        return f"{flight_day:%Y%m%d}"
     match = re.fullmatch(r"(\d{1,2})([A-Z]{3})(\d{2})?", flight_date)
     if not match or match.group(2) not in MONTHS:
         return None
     day, month = int(match.group(1)), MONTHS[match.group(2)]
     if match.group(3):
         return f"{2000 + int(match.group(3)):04d}{month:02d}{day:02d}"
-    archive_match = ARCHIVE_DATE.search(archive_name)
-    if not archive_match:
-        return None
-    year = int(archive_match.group(1))
-    archive_day = date(int(archive_match.group(1)), int(archive_match.group(2)),
-                       int(archive_match.group(3)))
     flight_day = date(year, month, day)
     if (flight_day - archive_day).days > 183:
         flight_day = date(year - 1, month, day)
@@ -95,7 +107,9 @@ PNL_LINE = re.compile(
     r"(?:\s+PART\s*(\d+))?",
     re.ASCII,
 )
-FWD_LINE = re.compile(r"^([A-Z0-9]{2,3}\d+[A-Z]?)/\d+\.([A-Z]{3})(?![A-Z0-9])", re.ASCII)
+FWD_LINE = re.compile(
+    r"^([A-Z0-9]{2,3}\d+[A-Z]?)/(\d{1,2})\.([A-Z]{3})(?![A-Z0-9])", re.ASCII
+)
 LDM_NEW_LINE = re.compile(
     r"^([A-Z0-9]{2,3}\d+[A-Z]?)/(\d{1,2}[A-Z]{3})(\d{2})?\.([A-Z0-9]+)", re.ASCII
 )
@@ -158,7 +172,11 @@ def _match_fwd(line):
     match = FWD_LINE.match(line)
     if not match:
         return None
-    return {"flight_number": match.group(1), "flight_airport": match.group(2)}
+    return {
+        "flight_number": match.group(1),
+        "flight_date": match.group(2),
+        "flight_airport": match.group(3),
+    }
 
 
 def _match_ldm_new(line):

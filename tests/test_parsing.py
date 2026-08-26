@@ -250,7 +250,7 @@ def test_fwd_line_stores_airport_not_registration(tmp_path, make_archive):
         "\x03\r\n",
     )
     assert row == envelope("FWD", "QU", "HKGTSXH", "HKGMUXX", "MU725",
-                           flight_airport="HKG")
+                           flight_airport="HKG", flight_date="20260628")
 
 
 def test_asm_line_parses_flight_and_explicit_year_date(tmp_path, make_archive):

@@ -372,6 +372,35 @@ def test_multihop_fwd_from_glued_keyword_is_fully_parsed(tmp_path, make_archive)
     assert segs[-1]["hop"] == "SIN"
 
 
+def test_fwd_day_only_date_uses_archive_month(tmp_path, make_archive):
+    body = (
+        "FWDZZ779/19.NRT.3/3/7\r\n"
+        "-TPE.B60.R50.A45.L5.T150.HKG/3.GBR/102.CHN/120\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    row = con.execute(
+        "SELECT flight_date FROM messages WHERE msg_type='FWD'"
+    ).fetchone()
+    assert row["flight_date"] == "20260619"
+
+
+def test_fwd_day_only_date_rolls_to_next_month_near_month_end(tmp_path, make_archive):
+    body = (
+        "FWDZZ779/01.NRT.3/3/7\r\n"
+        "-TPE.B60.R50.A45.L5.T150.HKG/3.GBR/102.CHN/120\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(
+        tmp_path, make_archive, body,
+        archive_name="PROCESSED_20260830_0025.tar.Z",
+    )
+    row = con.execute(
+        "SELECT flight_date FROM messages WHERE msg_type='FWD'"
+    ).fetchone()
+    assert row["flight_date"] == "20260901"
+
+
 def test_unhandled_types_store_no_fact_row(tmp_path, make_archive):
     body = "\r\n\x01QU HKGTSXH\r\n.TYOXXZZ 070132\r\n\x02ZZZ\r\nhello\r\n\x03\r\n"
     con = ingest_text(tmp_path, make_archive, body)
