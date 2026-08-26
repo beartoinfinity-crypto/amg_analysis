@@ -30,7 +30,10 @@ def normalize_flight_date(flight_date, archive_name):
     month = int(archive_match.group(2))
     archive_day = date(year, month, int(archive_match.group(3)))
     if day_only:
-        flight_day = date(year, month, int(day_only.group(1)))
+        try:
+            flight_day = date(year, month, int(day_only.group(1)))
+        except ValueError:
+            return None
         if flight_day < archive_day:
             import calendar
             days_left_in_month = calendar.monthrange(year, month)[1] - archive_day.day
@@ -104,7 +107,7 @@ FROM messages;
 """
 
 FLIGHT_LINE = re.compile(
-    r"^([A-Z0-9]{2,3}\d+[A-Z]?)/\d+\.([A-Z0-9]+)(?:\.([A-Z]{3}))?", re.ASCII
+    r"^([A-Z0-9]{2,3}\d+[A-Z]?)/(\d{1,2})\.([A-Z0-9]+)(?:\.([A-Z]{3}))?", re.ASCII
 )
 PNL_LINE = re.compile(
     r"^([A-Z0-9]{2,3}\d+[A-Z]?)/(\d{1,2}[A-Z]{3})\s+([A-Z]{3}(?:[A-Z]{3})?)"
@@ -155,8 +158,9 @@ def _match_flight_dot(line):
         return None
     return {
         "flight_number": match.group(1),
-        "aircraft_reg": match.group(2),
-        "flight_airport": match.group(3),
+        "flight_date": match.group(2),
+        "aircraft_reg": match.group(3),
+        "flight_airport": match.group(4),
     }
 
 

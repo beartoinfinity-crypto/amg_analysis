@@ -58,7 +58,8 @@ def test_movement_message_parses_envelope_and_flight(tmp_path, make_archive):
         "SI\n"
         "FR 50500\n",
     )
-    assert row == envelope("MVT", "QD", "HKGTSXH", "HKGODCI", "CI5825", "B18778", "HKG")
+    assert row == envelope("MVT", "QD", "HKGTSXH", "HKGODCI", "CI5825", "B18778", "HKG",
+               flight_date="20260606")
 
 
 def test_baggage_message_parses_type_without_flight(tmp_path, make_archive):
@@ -86,7 +87,8 @@ def test_movement_with_distribution_list_finds_origin(tmp_path, make_archive):
         "MVA\n"
         "NH814/06.JA808A.HKG\n",
     )
-    assert row == envelope("MVA", "QU", "HKGTSXH", "TYOFSNH", "NH814", "JA808A", "HKG")
+    assert row == envelope("MVA", "QU", "HKGTSXH", "TYOFSNH", "NH814", "JA808A", "HKG",
+               flight_date="20260606")
 
 
 def test_unrecognised_body_typed_other_without_fields(tmp_path, make_archive):
@@ -109,7 +111,8 @@ def test_real_type_b_control_character_framing_parses(tmp_path, make_archive):
         "SI CONFE91/CC3/CA9/DH1\r\n"
         "\x03\r\n",
     )
-    assert row == envelope("MVT", "QU", "HKGTSXH", "TYOXKJL", "JL0029", "JA872J", "HND")
+    assert row == envelope("MVT", "QU", "HKGTSXH", "TYOXKJL", "JL0029", "JA872J", "HND",
+               flight_date="20260607")
 
 
 def test_soh_address_continuation_lines_still_find_origin(tmp_path, make_archive):
@@ -124,7 +127,8 @@ def test_soh_address_continuation_lines_still_find_origin(tmp_path, make_archive
         "\x02MVT\r\n"
         "TG600/07.HSTKY.BKK\r\n",
     )
-    assert row == envelope("MVT", "QN", "HKGTSXH", "HDQOPTG", "TG600", "HSTKY", "BKK")
+    assert row == envelope("MVT", "QN", "HKGTSXH", "HDQOPTG", "TG600", "HSTKY", "BKK",
+               flight_date="20260607")
 
 
 def test_ldm_inline_flight_on_keyword_line_parses(tmp_path, make_archive):
@@ -138,7 +142,8 @@ def test_ldm_inline_flight_on_keyword_line_parses(tmp_path, make_archive):
         "BW 141087 BI 39.5\r\n"
         "\x03\r\n",
     )
-    assert row == envelope("LDM", "QU", "HKGTSXH", "TYOOZNH", "NH0813", "JA838A")
+    assert row == envelope("LDM", "QU", "HKGTSXH", "TYOOZNH", "NH0813", "JA838A",
+               flight_date="20260608")
 
 
 def test_unknown_three_letter_keyword_is_typed_with_flight(tmp_path, make_archive):
@@ -151,7 +156,8 @@ def test_unknown_three_letter_keyword_is_typed_with_flight(tmp_path, make_archiv
         "NH0814/08.JA839A.42/C\r\n"
         "\x03\r\n",
     )
-    assert row == envelope("ADL", "QU", "HKGTSXH", "HKGNHQS", "NH0814", "JA839A")
+    assert row == envelope("ADL", "QU", "HKGTSXH", "HKGNHQS", "NH0814", "JA839A",
+               flight_date="20260608")
 
 
 def test_pnl_info_line_parses_flight_date_airport_and_part(tmp_path, make_archive):
@@ -299,7 +305,8 @@ def test_div_uses_movement_style_line(tmp_path, make_archive):
         "EA0254 BNE\r\n"
         "\x03\r\n",
     )
-    assert row == envelope("DIV", "QU", "HKGTSXH", "HDQNPNZ", "NZ081", "ZKNZC", "HKG")
+    assert row == envelope("DIV", "QU", "HKGTSXH", "HDQNPNZ", "NZ081", "ZKNZC", "HKG",
+               flight_date="20260621")
 
 
 def test_flight_line_third_dot_segment_stores_airport(tmp_path, make_archive):
@@ -312,4 +319,20 @@ def test_flight_line_third_dot_segment_stores_airport(tmp_path, make_archive):
         "CI5825/12.B18778.HKG\r\n"
         "\x03\r\n",
     )
-    assert row == envelope("MVT", "QU", "HKGTSXH", "HKGODCI", "CI5825", "B18778", "HKG")
+    assert row == envelope("MVT", "QU", "HKGTSXH", "HKGODCI", "CI5825", "B18778",
+                           "HKG", flight_date="20260612")
+
+
+def test_movement_day_only_date_resolves_like_user_example(tmp_path, make_archive):
+    row = ingest_one(
+        tmp_path,
+        make_archive,
+        "\r\nQD HKGTSXH\r\n"
+        ".HKGRCCI 082010\r\n"
+        "\x02MVT\r\n"
+        "CI5836/08.B18780.HKG\r\n"
+        "AD1939/2009 EA2122 TPE\r\n"
+        "\x03\r\n",
+    )
+    assert row == envelope("MVT", "QD", "HKGTSXH", "HKGRCCI", "CI5836", "B18780",
+                           "HKG", flight_date="20260608")
