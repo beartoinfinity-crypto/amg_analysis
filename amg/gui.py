@@ -1,6 +1,7 @@
 import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 
 from amg.cli import ingest_archives, rebuild_archives, scan_archives
 
@@ -19,8 +20,14 @@ class ArchivePicker:
         top = ttk.Frame(root, padding=8)
         top.pack(fill="x")
         ttk.Label(top, text="Archives:").pack(side="left")
-        ttk.Label(top, text=str(archive_dir), foreground="#555").pack(side="left", padx=6)
+        self.archive_dir_var = tk.StringVar(value=str(archive_dir))
+        ttk.Label(top, textvariable=self.archive_dir_var, foreground="#555").pack(
+            side="left", padx=6
+        )
         ttk.Button(top, text="Refresh", command=self.refresh).pack(side="right")
+        ttk.Button(
+            top, text="Change folder...", command=self.change_folder
+        ).pack(side="right", padx=6)
 
         guide = ttk.Label(
             root, padding=(8, 0),
@@ -66,6 +73,21 @@ class ArchivePicker:
         self.status_var = tk.StringVar(value="")
         ttk.Label(bottom, textvariable=self.status_var).pack(side="right", padx=12)
 
+        self.refresh()
+
+    def change_folder(self):
+        if self.busy:
+            return
+        initial = str(self.archive_dir) if self.archive_dir.exists() else "."
+        chosen = filedialog.askdirectory(
+            title="Select folder containing *.tar.Z archives", initialdir=initial
+        )
+        if chosen:
+            self.set_archive_dir(Path(chosen))
+
+    def set_archive_dir(self, new_dir):
+        self.archive_dir = new_dir
+        self.archive_dir_var.set(str(new_dir))
         self.refresh()
 
     def refresh(self):
