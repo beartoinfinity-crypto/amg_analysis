@@ -118,7 +118,9 @@ Lists every archive as `indexed` or `pending`.
 **One seam.** All behaviour is reachable through one entry point -
 `amg.cli.main(argv)` (and the GUI, which is a thin layer over the same core
 functions). Archives are treated as immutable inputs; every derived fact lives
-in the database so it can be recomputed at any time.
+in the database so it can be recomputed at any time. Structured facts live in
+`message_facts` (one row per extracted message); repeating rows (PTM transfers,
+FWD hops) live in `message_segments`.
 
 **Ingest pipeline.** For each archive: system `tar` converts the compressed
 `.tar.Z` to an uncompressed stream in memory (~0.2s per archive), Python's
@@ -149,18 +151,56 @@ in different shapes per message family:
 | PNL, ADL, PAL, CAL, PSM | `FLIGHT/DDMMM AIRPORT [PARTn]` | flight_number, flight_date, flight_airport, part_number |
 | PTM | same, with from-to pair | flight_airport holds e.g. `SYXHKG` |
 
+Flight numbers are restricted to 1-4 digits (`\d{1,4}`) per AHM 780 spec.
+
 **flight_date normalisation.** Stored as `YYYYMMDD`. When the message itself
 carries a year (`16MAY26`) that year wins; otherwise the year comes from the
 archive filename, with a wrap rule (a December date in a January archive
-belongs to the previous year). Day-only dates stay empty.
+belongs to the previous year). Day-only dates (FWD `28`, LDM `28`) roll forward
+at month-end within a 48-hour window (e.g. day-30 in a 31-day month rolls to
+1st of next month; day-31 in a 31-day month stays put).
+
+**Per-family extractors.** Structured facts live in `message_facts` (one row
+per message). Extractors cover MVT/MVA, LDM, DIV, PTM, PSM/PAL/CAL, PNL/ADL,
+FWD, and ASM. Key fields:
+
+| Family | Facts extracted |
+| --- | --- |
+| MVT/MVA | AHM 780 times (`AD`/`EO`/`TD`/`AA`/`EL`/`EA`), destinations, delay slots (`IR1`-`IR8`, `DL1`-`DL4`), PAX (`transit`/`disembarking`/`total`/`infants`), SI fuel/weight/events |
+| LDM | cabins, PAX/PAD triples, BW/BI, deadload, crew |
+| DIV | DVA, ETA, POB, CAN |
+| PTM | transfer segments, total transfers, total baggage |
+| PSM/PAL/CAL | assist codes, CAL delta ops |
+| PNL/ADL | name-row/identifier-row counts, ADL changes (text fully redacted) |
+| FWD | multi-hop destinations, component blocks (`.B`/`.R`/`.A`/`.L`/`.T`), nationalities per-block + merged |
+| ASM | muted by default (allowlist for PQC-line carriers) |
+
+**AHM 780 movement times.** Each time code (e.g. `AD`, `AA`, `EL`) is stored
+as `{"time":"1939","date":null}` (or with a two-digit date for 6-digit forms
+like `AD070110`). The `EO` (estimated off-blocks) and `EL` (estimated landing)
+codes are derived from `AD/` pairs and `EA` tokens respectively. `TD` (touchdown)
+is derived from the first value of an `AA/` pair when no explicit `TD` token
+is present.
+
+**Delay slots.** `DL…` lines fill IR1/DL1 through IR2/DL2 pairs, `EDL…` lines
+fill IR3/DL3+, and `DLA…` lines add code-only entries at IR5+. Legacy flat
+lists (`delay_codes`, `delay_durations`) are kept for compatibility.
+
+**SI section.** Lines after an `SI` marker are scanned for known keys (`FR`,
+`EET`, `BO`, `TOF`, `PL`, `ZFW`) as glued or spaced values. Event lines like
+`SI DOOR CLSD 0455` are captured as timestamped events. Leading-zero strings
+(e.g. `EET0122`) are preserved as strings, not converted to integers.
 
 **Full-text search.** An SQLite FTS5 index over raw text, rebuilt after any
 ingest that changed rows (guarded by an index/content count check so it can
-never go stale).
+never go stale). Structured facts and repeating segments live in separate
+tables (`message_facts`, `message_segments`) joined by `message_id`.
 
 **Browsing externally.** Open `amg_messages.db` in DB Browser for SQLite. Use
 the `messages_readable` view - identical columns plus `message_text`, which is
-raw text with framing bytes stripped for readable display.
+raw text with framing bytes stripped for readable display. Structured facts
+are in `message_facts.facts_json`; repeating rows (PTM transfers, FWD hops)
+are in `message_segments.data_json`.
 
 ## Development
 

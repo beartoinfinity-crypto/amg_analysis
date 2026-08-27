@@ -8,6 +8,7 @@ behind it, and the traps to avoid. For user-facing documentation see
 
 ```
 amg/cli.py      core: parsing, ingestion, query commands, argparse entry point
+amg/extractors.py per-family extractors: MVT, LDM, DIV, PTM, PSM/PAL/CAL, PNL/ADL, FWD, ASM
 amg/gui.py      thin tkinter layer over cli core functions (no business logic)
 amg/__main__.py enables `python -m amg`
 tests/          pytest suite; drives only public seams (CLI + database schema)
@@ -57,6 +58,10 @@ messages(id PK, received_at TEXT NULL, station NOT NULL, status NOT NULL,
          UNIQUE (source_archive, source_file))
 archives(name PK, size INTEGER NOT NULL, ingested_at TEXT NOT NULL)
 messages_fts  fts5(raw_text, content='messages', content_rowid='id')
+message_facts(message_id PK REFERENCES messages(id), family NOT NULL,
+              facts_json TEXT NOT NULL)
+message_segments(id PK, message_id NOT NULL REFERENCES messages(id),
+                 seq INTEGER NOT NULL, data_json TEXT NOT NULL)
 VIEW messages_readable = messages + message_text (framing bytes stripped)
 ```
 
@@ -105,8 +110,12 @@ Converts an info-line date like `13MAY`, `16MAY26` to `YYYYMMDD`.
 - Wrap rule: if the constructed date lies more than 183 days after the
   archive's own date, use the previous year (a `28DEC` flight in a January
   archive belongs to December just gone).
-- Day-only dates (FWD's `28`) have no month anchor -> NULL. Unknown months ->
-  NULL. Never raise.
+- Day-only dates (FWD `28`, LDM `31`) have no month: take the archive's
+  month. Forward-window rule: if the remaining days in the archive's month
+  plus the day value is ≤ 48 hours (`forward_window_days = 2`), roll into
+  the next month. E.g. day-31 in a 30-day-month archive → 1st of next month;
+  day-31 in a 31-day-month archive → stays 31st. Unknown months -> NULL.
+  Never raise.
 
 ---
 
@@ -147,10 +156,10 @@ regex is how `NRT` ended up in `aircraft_reg` for FWD messages historically.
 
 | Matcher | Regex | Used by | Returns |
 | --- | --- | --- | --- |
-| `_match_fwd` | `FWD_LINE`: `FLIGHT/\d+.([A-Z]{3})(?![A-Z0-9])` | FWD first | flight_airport from segment 2 |
+| `_match_fwd` | `FWD_LINE`: `FLIGHT/\d{1,2}.([A-Z]{3})(?![A-Z0-9])` | FWD first | flight_airport from segment 2 |
 | `_match_ldm_new` | `LDM_NEW_LINE`: `FLIGHT/DDMMM(\d{2})?.REG` | LDM first | flight, raw date (+YY), reg |
-| `_match_asm` | `ASM_LINE`: `FLIGHT/DDMMM(\d{2})(?:\s|$)` | ASM first | flight, raw date |
-| `_match_flight_dot` | `FLIGHT_LINE`: `FLIGHT/digits.REG(.AIRPORT)?` | everyone (generic) | flight, reg, airport |
+| `_match_asm` | `ASM_LINE`: `FLIGHT/DDMMM(\d{2})(?:\s\|$)` | ASM first | flight, raw date |
+| `_match_flight_dot` | `FLIGHT_LINE`: `FLIGHT/\d{1,4}.REG(.AIRPORT)?` | everyone (generic) | flight, reg, airport |
 | `_match_pnl_style` | `PNL_LINE`: `FLIGHT/DDMMM AIRPORT[PAIR]( PARTn)?` | everyone (generic) | flight, raw date, airport/city-pair, part |
 
 `CATEGORY_PARSERS` gates the specific ones: FWD/LDM/ASM get their matcher
@@ -178,6 +187,79 @@ parser chain -> return dict of msg_type/priority/destination/origin/
 flight_number/aircraft_reg/flight_airport/flight_date/part_number. Raw date
 strings leave this function unnormalised; conversion happens at insert time
 because only there is the archive name known.
+
+---
+
+## Per-family extractors (`amg/extractors.py`)
+
+Pure functions: message text in, structured facts out. No database access.
+`CATEGORY_PARSERS` in `cli.py` dispatches to the right extractor by keyword;
+each returns a dict that becomes `message_facts.facts_json` (scalar facts) and
+optionally `message_segments.data_json` rows (repeating data).
+
+### `extract_movement(raw_text) -> dict`
+
+Covers MVT and MVA. Parses:
+
+- **AHM 780 times** via `_times(raw_text)`: scans lines for time codes
+  (`AD`, `EA`, `EO`, `EL`, `TD`, `AA`, `ED`, `RA`, etc.). Each time code
+  becomes `{"time":"1939","date":null}`. Special cases:
+  - `AD1654/1712` → `AD` = off-blocks, pair value → `EO` (estimated off-blocks)
+  - `EA1834` → `EL` (estimated landing)
+  - `AA1612/1624` without explicit `TD` → `TD` = touchdown (first), `AA` = on-blocks (second)
+  - `AA1612/1624` with explicit `TD` token → `TD` from token (wins), `AA` = on-blocks
+  - 6-digit forms (`AD070110`) → `time: "0110"`, `date: "07"`
+- **Destination**: airport code after a time line (3-letter IATA after `EA`/`AD`/`AA`).
+- **Delay slots** via `_delay_slots(raw_text)`: `DL…` fills `IR1`/`DL1` pairs,
+  `EDL…` continues at `IR3`/`DL3`+, `DLA…` adds code-only entries at `IR5`+.
+  Legacy flat lists (`delay_codes`, `delay_durations`) kept for compatibility.
+- **PAX**: `PX30/185` → transit + disembarking + total; `PAX215+0INF` → total + infants.
+- **SI section** via `_si_section(raw_text)`: after an `SI` marker line, scans
+  for known keys (`FR` fuel remaining, `EET` elapsed time, `BO` burn-off,
+  `TOF` takeoff fuel, `PL` payload, `ZFW` zero fuel weight) as glued or spaced
+  values. Event lines like `SI DOOR CLSD 0455` captured as timestamped events.
+  Leading-zero strings (`EET0122`) preserved as strings, not integers.
+
+### `extract_diversion(raw_text) -> dict`
+
+DIV: DVA/ETA from `DVA_ETA_RE`, POB count, CAN flag.
+
+### `extract_load(raw_text) -> dict`
+
+LDM: cabin tokens, PAX/PAD triples, BW/BI, deadload, crew. FTS lines
+(FW/PX/CG) not stored in facts (available in raw text).
+
+### `extract_transfer(raw_text) -> (dict, [dict])`
+
+PTM: total transfers, total baggage, per-transfer segments stored in
+`message_segments`. Names are partially redacted (policy: names stripped,
+assist codes kept).
+
+### `extract_assistance(raw_text) -> dict`
+
+PSM/PAL/CAL: assist codes list. CAL also captures delta ops and pax total.
+
+### `extract_name_list(raw_text) -> (dict, str)`
+
+PNL/ADL: counts name rows and identifier rows (or ADL changes). Returns
+facts dict and a fully-redacted text skeleton. Zero PII in storage.
+
+### `extract_forward(raw_text) -> (dict, [dict])`
+
+FWD: crew, multi-hop destinations via `FWD_DASH_DEST_RE`, per-block components
+(`.B`/`.R`/`.A`/`.L`/`.T`), nationalities per-block + merged. Transfer rows
+stored in `message_segments`.
+
+### `validate(facts_json, family) -> [str]`
+
+Post-extraction validation. Catches 0-destination FWD, negative PAX, payload
+exceeding MTOW, etc. Returns a list of warning strings (empty = clean).
+
+### `redact_text(text, family) -> str`
+
+PII redaction: PNL/ADL fully redacted (count-only); PTM/PSM/PAL/CAL partial
+(names stripped, assist codes kept). Redaction runs on `raw_text` before
+storage — verified zero leaks on MR/MRS/ticket/passport pattern sweeps.
 
 ---
 
@@ -278,6 +360,7 @@ Thin by design: widget wiring only; all work happens in `ingest_archives` /
 
 - Everything goes through `main([...])` (the seam) or pure helpers; asserts
   land on stdout/stderr, exit codes, or direct SQLite reads of tmp DBs.
+  Extractor tests drive `extract_*` functions directly against fixture text.
 - `tests/conftest.py` ships a hand-rolled pure-Python **LZW compressor**
   because stdlib cannot WRITE `.tar.Z`. Keep fixtures genuine `.tar.Z` so the
   discovery glob and tar pipeline behave exactly like production; switching

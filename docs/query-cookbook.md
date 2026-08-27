@@ -8,9 +8,12 @@ Tables involved:
 
 | Object | Purpose |
 | --- | --- |
-| `messages_readable` | view = `messages` + `message_text` (framing bytes stripped) |
-| `message_facts` | one row per extracted message: `family`, `facts_json` |
-| `message_segments` | repeating rows (PTM transfers, FWD hops): `seq`, `data_json` |
+| `messages` | raw parsed messages (framing bytes preserved in `raw_text`) |
+| `messages_readable` | view = `messages` + `message_text` (framing bytes stripped for display) |
+| `message_facts` | one row per extracted message: `family`, `facts_json` (JSON object) |
+| `message_segments` | repeating rows (PTM transfers, FWD hops): `seq`, `data_json` (JSON object) |
+| `messages_fts` | FTS5 index over `raw_text`; query via `MATCH` on `rowid` |
+| `archives` | ingested archive names + sizes (used by dedup logic) |
 
 ---
 
@@ -316,4 +319,24 @@ Line-limit violations (spec 1.2 monitoring):
 ```sql
 SELECT COUNT(*) FROM message_facts
 WHERE json_extract(facts_json, '$.line_limit_violations') > 0;
+```
+
+Messages with line-limit violations (for investigation):
+
+```sql
+SELECT r.received_at, r.msg_type, r.flight_number,
+       json_extract(f.facts_json, '$.line_limit_violations') AS violations,
+       r.message_text
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+WHERE json_extract(f.facts_json, '$.line_limit_violations') > 0;
+```
+
+Filter by flight number (1-4 digit flights per AHM 780):
+
+```sql
+SELECT received_at, msg_type, flight_number, message_text
+FROM messages_readable
+WHERE flight_number = 'CI5825'
+ORDER BY received_at DESC;
 ```
