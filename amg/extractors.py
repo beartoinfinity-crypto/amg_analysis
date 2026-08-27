@@ -201,8 +201,11 @@ def _absorb_si_tokens(tokens, si, events):
         token = tokens[i]
         for key, name in SI_VALUE_KEYS.items():
             if token == key and i + 1 < len(tokens):
-                si[name] = _si_value(tokens[i + 1])
-                i += 1
+                j = i + 1
+                if "/" in tokens[j] and j + 1 < len(tokens):
+                    j += 1
+                si[name] = _si_value(tokens[j])
+                i = j
                 matched_any = True
                 break
             if token.startswith(key) and len(token) > len(key) and not token.isalpha():
