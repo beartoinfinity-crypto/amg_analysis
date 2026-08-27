@@ -53,6 +53,27 @@ FWD_DASH_DEST_RE = re.compile(r"-([A-Z]{3})((?:\.[BRLAT]\d+)+)")
 FWD_COMPONENT_RE = re.compile(r"\.([BRLAT])(\d+)(?![0-9])")
 NATIONALITY_RE = re.compile(r"(?<![A-Z0-9])([A-Z]{3})/(\d+)(?![0-9])")
 
+LDM_HEADER_RE = re.compile(
+    r"^(?P<carrier>[A-Z0-9]{2,3})(?P<flight_num>\d{1,4})(?P<suffix>[A-Z])?/"
+    r"(?P<day>\d{1,2}(?:[A-Z]{3}\d{2})?)\.(?P<reg>[A-Z0-9\-]+)"
+    r"\.(?P<type>[A-Z0-9]+)?(?:\.(?P<crew_ckpt>\d+)/(?P<crew_cab>\d+)"
+    r"(?:/(?P<crew_cab_f>\d+))?)?",
+    re.ASCII,
+)
+LDM_NIL_RE = re.compile(r"^NIL$", re.IGNORECASE)
+LDM_SEG_PAX_RE = re.compile(r"^\d+/\d+/\d+(?:/\d+)?$")
+LDM_DEADLOAD_RE = re.compile(r"^T(\d+)$")
+LDM_PAX_CLASS_RE = re.compile(r"^PAX/(\d+(?:/\d+){1,2})$")
+LDM_PAD_CLASS_RE = re.compile(r"^PAD/(\d+(?:/\d+){1,2})$")
+LDM_PAX_TOTAL_RE = re.compile(r"^PAX/(\d+)$")
+LDM_PAD_TOTAL_RE = re.compile(r"^PAD/(\d+)$")
+LDM_COMPARTMENT_RE = re.compile(r"^\d+/\d+$")
+LDM_CATEGORY_RE = re.compile(r"^([A-Z]{3})/(\d+)(?:/(\d+))?$")
+SI_BREAKDOWN_RE = re.compile(
+    r"^(?P<station>[A-Z]{3})\s+FRE\s+(?P<fre>\d+)\s+POS\s+(?P<pos>\d+)\s+BAG\s+"
+    r"(?P<bag>\d+)(?:\s*/\s*(?P<bag_weight>\d+))?\s+TRA\s+(?P<tra>\d+)"
+)
+
 ASSIST_CODES = ("WCHR", "WCHC", "WCHS", "WCB", "DEAF", "BLND", "MEDA", "UMNR", "MAAS", "ESAN")
 
 FAMILIES = {
@@ -290,37 +311,249 @@ def extract_diversion(raw_text):
     return facts
 
 
+def _split_pax_classes(values):
+    nums = [int(v) for v in values.split("/")]
+    if len(nums) == 3:
+        return {"first": nums[0], "business": nums[1], "economy": nums[2]}
+    return {"first": 0, "business": nums[0], "economy": nums[1]}
+
+
+def _ldm_class_totals(segment):
+    classes = segment.get("classes", {})
+    return {"first": classes.get("first", 0),
+            "business": classes.get("business", 0),
+            "economy": classes.get("economy", 0)}
+
+
+def _parse_ldm_segment_tokens(tokens, segment):
+    for token in tokens:
+        if not token:
+            continue
+        if LDM_NIL_RE.match(token):
+            segment["nil_traffic"] = True
+            continue
+        deadload = LDM_DEADLOAD_RE.match(token)
+        if deadload:
+            segment["deadload"] = int(deadload.group(1))
+            continue
+        pax_class = LDM_PAX_CLASS_RE.match(token)
+        if pax_class:
+            segment["classes"] = _split_pax_classes(pax_class.group(1))
+            continue
+        pad_class = LDM_PAD_CLASS_RE.match(token)
+        if pad_class:
+            segment["pads"] = _split_pax_classes(pad_class.group(1))
+            continue
+        if LDM_PAX_TOTAL_RE.match(token) or LDM_PAD_TOTAL_RE.match(token):
+            continue
+        if LDM_SEG_PAX_RE.match(token):
+            parts = [int(v) for v in token.split("/")]
+            if len(parts) == 4:
+                segment["adults"] = parts[0] + parts[1]
+                segment["children"] = parts[2]
+                segment["infants"] = parts[3]
+            else:
+                segment["adults"], segment["children"], segment["infants"] = parts
+            segment["pax_total"] = segment["adults"] + segment["children"]
+            continue
+        if LDM_COMPARTMENT_RE.match(token):
+            continue
+        category = LDM_CATEGORY_RE.match(token)
+        if category:
+            segment["categories"].append({
+                "code": category.group(1),
+                "count": int(category.group(2)),
+                "weight": int(category.group(3)) if category.group(3) else 0,
+            })
+            continue
+
+
+def _parse_ldm_segments(raw_text):
+    segments, current = [], None
+    for line in validate_lines(raw_text):
+        stripped = line.strip()
+        if stripped.startswith("-") and len(stripped) >= 4 and stripped[1:4].isalpha():
+            dest = stripped[1:4].upper()
+            current = {
+                "dest": dest,
+                "nil_traffic": False,
+                "adults": 0,
+                "children": 0,
+                "infants": 0,
+                "pax_total": 0,
+                "deadload": 0,
+                "classes": {"first": 0, "business": 0, "economy": 0},
+                "pads": {"first": 0, "business": 0, "economy": 0},
+                "categories": [],
+            }
+            segments.append(current)
+            _parse_ldm_segment_tokens(stripped[4:].split("."), current)
+            continue
+        if stripped.startswith(".") and current is not None:
+            _parse_ldm_segment_tokens(stripped.split("."), current)
+    return segments
+
+
+def _ldm_header(raw_text):
+    for line in validate_lines(raw_text):
+        stripped = line.strip()
+        match = LDM_HEADER_RE.match(stripped)
+        if not match or match.group("day") is None:
+            continue
+        g = match.groupdict()
+        crew_cab = (int(g["crew_cab"]) if g["crew_cab"] else 0) + (
+            int(g["crew_cab_f"]) if g["crew_cab_f"] else 0
+        )
+        crew_ckpt = int(g["crew_ckpt"]) if g["crew_ckpt"] else 0
+        facts = {
+            "carrier": g["carrier"],
+            "flight_num": g["flight_num"],
+            "day_of_month": int(g["day"][:2]),
+        }
+        if g["suffix"]:
+            facts["suffix"] = g["suffix"]
+        if g["reg"]:
+            facts["reg"] = g["reg"].upper()
+        if g["type"]:
+            facts["ac_type"] = g["type"].upper()
+        if crew_ckpt or crew_cab:
+            facts["crew"] = {"cockpit": crew_ckpt, "cabin": crew_cab, "total": crew_ckpt + crew_cab}
+        cabins = {}
+        for run in CABIN_RUN_RE.findall(stripped):
+            for code, count in CABIN_PAIR_RE.findall(run):
+                cabins[code] = int(count)
+        if cabins:
+            facts["cabins"] = cabins
+        return facts
+    return {}
+
+
+def _ldm_si(raw_text):
+    si_lines, collecting = [], False
+    breakdown = None
+    for line in validate_lines(raw_text):
+        stripped = line.strip()
+        if stripped.upper().startswith("SI") and (
+            len(stripped) == 2 or stripped[2:3].isspace()
+        ):
+            collecting = True
+            if len(stripped) > 2:
+                si_lines.append(stripped[3:].strip())
+            continue
+        if not collecting:
+            continue
+        if re.match(r"^END", stripped, re.IGNORECASE):
+            break
+        if not stripped or stripped.startswith("\x03"):
+            break
+        if stripped:
+            match = SI_BREAKDOWN_RE.match(stripped)
+            if match and breakdown is None:
+                breakdown = {
+                    "station": match.group("station"),
+                    "fre": int(match.group("fre")),
+                    "pos": int(match.group("pos")),
+                    "bag": int(match.group("bag")),
+                    "tra": int(match.group("tra")),
+                }
+                if match.group("bag_weight"):
+                    breakdown["bag_weight"] = int(match.group("bag_weight"))
+            si_lines.append(stripped)
+    return " ".join(si_lines).strip(), breakdown
+
+
 def extract_load(raw_text):
-    facts = {}
-    info_line = next((l for l in validate_lines(raw_text)
-                      if re.match(r"^[A-Z0-9]{2,3}\d+[A-Z]?/", l.strip())), "")
-    cabins = {}
-    for run in CABIN_RUN_RE.findall(info_line):
-        for code, count in CABIN_PAIR_RE.findall(run):
-            cabins[code] = int(count)
-    if cabins:
-        facts["cabins"] = cabins
-    pax = PAX_RE.search(raw_text)
-    if pax:
-        facts["pax"] = {"adults": int(pax.group(1)), "children": int(pax.group(2)),
-                        "infants": int(pax.group(3))}
-    pad = PAD_RE.search(raw_text)
-    if pad:
-        facts["pad"] = {"adults": int(pad.group(1)), "children": int(pad.group(2)),
-                        "infants": int(pad.group(3))}
-    deadload = DEADLOAD_RE.search(raw_text)
-    if deadload:
-        facts["deadload"] = int(deadload.group(1))
-    crew = CREW_RE.search(raw_text)
-    if crew:
-        facts["crew"] = {"cockpit": int(crew.group(1)), "cabin": int(crew.group(2))}
+    facts, segments = {}, []
+    header = _ldm_header(raw_text)
+    if header.get("reg"):
+        facts["reg"] = header["reg"]
+    if header.get("cabins"):
+        facts["cabins"] = header["cabins"]
+    if header.get("crew"):
+        facts["crew"] = header["crew"]
+    if header.get("ac_type"):
+        facts["ac_type"] = header["ac_type"]
+
+    parsed_segments = _parse_ldm_segments(raw_text)
+    for seg in parsed_segments:
+        segments.append({
+            "dest": seg["dest"],
+            "nil_traffic": seg["nil_traffic"],
+            "adults": seg["adults"],
+            "children": seg["children"],
+            "infants": seg["infants"],
+            "pax_total": seg["pax_total"],
+            "deadload": seg["deadload"],
+            "classes": seg["classes"],
+            "pads": seg["pads"],
+            "categories": seg["categories"],
+        })
+
+    si_text, breakdown = _ldm_si(raw_text)
+    if si_text:
+        facts["si"] = si_text
+    if breakdown:
+        facts["station_breakdown"] = breakdown
+
+    flattened = _aggregate_load(parsed_segments)
+    for key, value in flattened.items():
+        facts[key] = value
+
     bw = BW_RE.search(raw_text)
     if bw:
         facts["basic_weight"] = int(bw.group(1))
     bi = BI_RE.search(raw_text)
     if bi:
         facts["balance_index"] = float(bi.group(1))
-    return facts
+    return facts, segments
+
+
+def _aggregate_load(segments, current_station="HKG"):
+    if not segments:
+        return {}
+    route = []
+    for seg in segments:
+        if seg["dest"] not in route:
+            route.append(seg["dest"])
+    if current_station not in route:
+        current_station = route[0]
+    local = next((s for s in segments if s["dest"] == current_station), None)
+    if local is None:
+        return {}
+    idx = route.index(current_station)
+    downstream = [s for s in segments
+                  if s["dest"] in route[idx + 1:] and not s["nil_traffic"]]
+
+    def pax(s):
+        return s["adults"] + s["children"]
+
+    local_pax = pax(local) if not local["nil_traffic"] else 0
+    transit_pax = sum(pax(s) for s in downstream)
+    total_pax = local_pax + transit_pax
+
+    local_classes = _ldm_class_totals(local)
+    first = local_classes["first"]
+    business = local_classes["business"]
+    economy = local_classes["economy"]
+    for s in downstream:
+        c = _ldm_class_totals(s)
+        first += c["first"]
+        business += c["business"]
+        economy += c["economy"]
+
+    local_ddl = 0 if local["nil_traffic"] else local["deadload"]
+    deadload = local_ddl + sum(s["deadload"] for s in downstream)
+
+    return {
+        "local_station": current_station,
+        "px7": local_pax,
+        "px6": transit_pax,
+        "pax": total_pax,
+        "px1": first,
+        "px2": business,
+        "px3": economy,
+        "ddl": deadload,
+    }
 
 
 def _ptm_row(line):
@@ -469,7 +702,7 @@ EXTRACTORS = {
     "MVT": lambda t: (extract_movement(t), []),
     "MVA": lambda t: (extract_movement(t), []),
     "DIV": lambda t: (extract_diversion(t), []),
-    "LDM": lambda t: (extract_load(t), []),
+    "LDM": extract_load,
     "PTM": lambda t: extract_transfer(t),
     "PSM": lambda t: (extract_assistance(t), []),
     "PAL": lambda t: (extract_assistance(t), []),

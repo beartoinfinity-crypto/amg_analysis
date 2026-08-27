@@ -90,10 +90,8 @@ def test_ldm_extracts_weights_pax_and_cabin_totals(tmp_path, make_archive):
         "\r\n\x01QU HKGTSXH\r\n"
         ".HKGLDKE 081951\r\n"
         "\x02LDM\r\n"
-        "KE0314/08.HL8045.J12C30Y200\r\n"
-        "-ICN.208/36/0.0.T18797.1/2495.2/7512\r\n"
-        ".PAX/28/2/214.PAD/0/0/0\r\n"
-        "CRW/4/10\r\n"
+        "KE0314/08.HL8045.J12C30Y200.2/4\r\n"
+        "-HKG.208/36/0.0.T18797.1/2495.2/7512.PAX/0/0/214.PAD/0/0/0\r\n"
         "BW 141087 BI 39.5\r\n"
         "\x03\r\n"
     )
@@ -103,12 +101,140 @@ def test_ldm_extracts_weights_pax_and_cabin_totals(tmp_path, make_archive):
         con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
     )
     assert facts["cabins"] == {"J": 12, "C": 30, "Y": 200}
-    assert facts["pax"] == {"adults": 28, "children": 2, "infants": 214}
-    assert facts["pad"] == {"adults": 0, "children": 0, "infants": 0}
-    assert facts["deadload"] == 18797
-    assert facts["crew"] == {"cockpit": 4, "cabin": 10}
+    assert facts["crew"] == {"cockpit": 2, "cabin": 4, "total": 6}
     assert facts["basic_weight"] == 141087
     assert facts["balance_index"] == 39.5
+    assert facts["px7"] == 244
+    assert facts["px6"] == 0
+    assert facts["pax"] == 244
+
+
+def test_ldm_parses_destination_segments_and_aggregates(tmp_path, make_archive):
+    body = (
+        "\r\n\x01QD HKGTSXH\r\n"
+        ".SELWB7C 052051\r\n"
+        "\x02LDM\r\n"
+        "7C6013/05.HL8594.Y189.2/4\r\n"
+        "-HKG.147/2/0.T4399.1/541.2/1191.3/2667.PAX/149.PAD/0\r\n"
+        "-SFO.10/2/0/0.T1000.PAX/0/12\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    segs = [json.loads(r[0]) for r in con.execute(
+        "SELECT data_json FROM message_segments ORDER BY seq")]
+    assert len(segs) == 2
+    assert segs[0]["dest"] == "HKG"
+    assert segs[0]["adults"] == 147 and segs[0]["children"] == 2 and segs[0]["infants"] == 0
+    assert segs[0]["deadload"] == 4399
+    assert segs[1]["dest"] == "SFO"
+    assert segs[1]["adults"] == 12
+    assert facts["px7"] == 149
+    assert facts["px6"] == 12
+    assert facts["pax"] == 161
+    assert facts["ddl"] == 4399 + 1000
+
+
+def test_ldm_gender_detail_segments_and_cabin_classes(tmp_path, make_archive):
+    body = (
+        "\r\n\x01QD HKGTSXH\r\n"
+        ".ISTKMTK 301420\r\n"
+        "\x02LDM\r\n"
+        "TK170/30.TCLLA.00F30C270Y.3/11\r\n"
+        "-HKG.139/66/1/0.0.T13520.1/1780.2/5020.3/5059.4/916.5/745"
+        ".PAX/0/17/189.PAD/0/1/6\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    segs = [json.loads(r[0]) for r in con.execute(
+        "SELECT data_json FROM message_segments ORDER BY seq")]
+    assert segs[0]["pax_total"] == 206
+    assert segs[0]["classes"] == {"first": 0, "business": 17, "economy": 189}
+    assert segs[0]["pads"] == {"first": 0, "business": 1, "economy": 6}
+    assert facts["pax"] == 206
+    assert facts["px2"] == 17
+    assert facts["px3"] == 189
+
+
+def test_ldm_nil_traffic_segment_contributes_nothing(tmp_path, make_archive):
+    body = (
+        "\r\n\x01QD HKGTSXH\r\n"
+        ".SELWB7C 052051\r\n"
+        "\x02LDM\r\n"
+        "7C6013/05.HL8594.Y189.2/4\r\n"
+        "-HKG.NIL\r\n"
+        "-SFO.10/2/0/0.T1000.PAX/0/12\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    segs = [json.loads(r[0]) for r in con.execute(
+        "SELECT data_json FROM message_segments ORDER BY seq")]
+    assert segs[0]["nil_traffic"] is True
+    assert facts["px6"] == 12
+    assert facts["pax"] == 12
+
+
+def test_ldm_captures_si_text_and_station_breakdown(tmp_path, make_archive):
+    body = (
+        "\r\n\x01QD HKGTSXH\r\n"
+        ".PEKDP1E HX/301401\r\n"
+        "\x02LDM\r\n"
+        "HX0283/30APR26.BLPW.Y220.02/06\r\n"
+        "-HKG.87/112/8/0.0.T1672.1/454.3/840.4/378.PAX/207.PAD/3\r\n"
+        "SI\r\n"
+        "BW 48600 BI 42.00\r\n"
+        "HKG FRE 44 POS 0 BAG 1628 TRA 0 BAGP 139\r\n"
+        "NOTOC : NO\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert "RETURN" not in facts["si"]
+    assert "NOTOC" in facts["si"]
+    assert facts["station_breakdown"] == {"station": "HKG", "fre": 44, "pos": 0,
+                                          "bag": 1628, "tra": 0}
+
+
+def test_ldm_supports_interface_column_mapping(tmp_path, make_archive):
+    from amg.extractors import INTERFACE_COLUMN_MAPPINGS
+    INTERFACE_COLUMN_MAPPINGS.update({
+        "REG": "AMG_REG", "PAX": "AMG_PAX", "SI": "AMG_SIT", "DDL": "DDL",
+    })
+    try:
+        body = (
+            "\r\n\x01QD HKGTSXH\r\n"
+            ".SELWB7C 052051\r\n"
+            "\x02LDM\r\n"
+            "7C6013/05.HL8594.Y189.2/4\r\n"
+            "-HKG.147/2/0.T4399.PAX/149.PAD/0\r\n"
+            "SI PANTRY CODE A\r\n"
+            "\x03\r\n"
+        )
+        con = ingest_text(tmp_path, make_archive, body)
+        import json
+        facts = json.loads(
+            con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+        )
+        assert facts["AMG_REG"] == "HL8594"
+        assert facts["AMG_PAX"] == 149
+        assert facts["AMG_SIT"] == "PANTRY CODE A"
+        assert facts["DDL"] == 4399
+    finally:
+        INTERFACE_COLUMN_MAPPINGS.clear()
 
 
 def test_ptm_extracts_transfer_segments_without_names(tmp_path, make_archive):
