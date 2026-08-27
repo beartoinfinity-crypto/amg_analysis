@@ -120,7 +120,7 @@ Lists every archive as `indexed` or `pending`.
 functions). Archives are treated as immutable inputs; every derived fact lives
 in the database so it can be recomputed at any time. Structured facts live in
 `message_facts` (one row per extracted message); repeating rows (PTM transfers,
-FWD hops) live in `message_segments`.
+FWD hops, LDM destination segments) live in `message_segments`.
 
 **Ingest pipeline.** For each archive: system `tar` converts the compressed
 `.tar.Z` to an uncompressed stream in memory (~0.2s per archive), Python's
@@ -167,7 +167,7 @@ FWD, and ASM. Key fields:
 | Family | Facts extracted |
 | --- | --- |
 | MVT/MVA | AHM 780 times (`AD`/`EO`/`TD`/`AA`/`EL`/`EA`), destinations, delay slots (`IR1`-`IR8`, `DL1`-`DL4`), PAX (`transit`/`disembarking`/`total`/`infants`), SI fuel/weight/events |
-| LDM | cabins, PAX/PAD triples, BW/BI, deadload, crew |
+| LDM | per-destination segments (pax breakdown, deadload, cabin classes, categories), aggregated PX6/PX7/PAX, PX1-3 classes, DDL deadload, crew, SI remarks + station FRE/POS/BAG/TRA breakdown |
 | DIV | DVA, ETA, POB, CAN |
 | PTM | transfer segments, total transfers, total baggage |
 | PSM/PAL/CAL | assist codes, CAL delta ops |
@@ -199,8 +199,8 @@ tables (`message_facts`, `message_segments`) joined by `message_id`.
 **Browsing externally.** Open `amg_messages.db` in DB Browser for SQLite. Use
 the `messages_readable` view - identical columns plus `message_text`, which is
 raw text with framing bytes stripped for readable display. Structured facts
-are in `message_facts.facts_json`; repeating rows (PTM transfers, FWD hops)
-are in `message_segments.data_json`.
+are in `message_facts.facts_json`; repeating rows (PTM transfers, FWD hops,
+LDM destination segments) are in `message_segments.data_json`.
 
 ## Development
 

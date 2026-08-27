@@ -224,10 +224,46 @@ Covers MVT and MVA. Parses:
 
 DIV: DVA/ETA from `DVA_ETA_RE`, POB count, CAN flag.
 
-### `extract_load(raw_text) -> dict`
+### `extract_load(raw_text) -> (dict, [dict])`
 
-LDM: cabin tokens, PAX/PAD triples, BW/BI, deadload, crew. FTS lines
-(FW/PX/CG) not stored in facts (available in raw text).
+LDM (AHM 583) covers full load messages. Returns flat facts and one row per
+destination segment. Sub-functions:
+
+- **`_ldm_header(raw_text)`** - parses the info line via `LDM_HEADER_RE`:
+  `CARRIER/DD[MMMYY].REG.TYPE[.CREW_CKPT/CREW_CAB[/CREW_CAB_F]]`. Handles 2-part
+  and 3-part crew tokens (female cabin subset optional); cabin config (e.g.
+  `J12C30Y200`, `Y189`) captured via `cabins` using the shared
+  `CABIN_RUN_RE`/`CABIN_PAIR_RE`; day accepts `DD` or `DDMMMYY`.
+- **`_parse_ldm_segments(raw_text)`** - each `-DEST` line opens a segment;
+  dot-continuation lines (starting `.`) extend the current one. Per token
+  (via `_parse_ldm_segment_tokens`):
+  - `.NIL` → `nil_traffic` (excluded from aggregation, stored as zeros)
+  - `T<digits>` → deadload weight
+  - `PAX/a/b` or `PAX/a/b/c` → cabin classes (First/Business/Economy);
+    single `PAX/n` ignored (redundant total)
+  - `PAD/...` → pad classes (positional, same 2/3-value forms)
+  - `\d+/\d+/\d+` or `\d+/\d+/\d+/\d+` → pax breakdown. 3-part =
+    adults/children/infants; 4-part = male/female/child/infant (adults =
+    male+female).
+  - `\d+/\d+` → compartment weight (ignored for pax)
+  - `[A-Z]{3}/count[/weight]` → special category (HUM, EIC, etc.)
+- **`_aggregate_load(segments)`** - runs the multi-leg aggregation from the
+  spec. `local_station` defaults to HKG; if HKG absent, falls back to the
+  first listed destination (station-absence safety). Transit = downstream
+  segments after the local in route order; `.NIL` segments contribute zero.
+  Outputs flat DB-column keys: `px7` (local), `px6` (transit), `pax` (total =
+  AMG_PAX), `px1`/`px2`/`px3` (class totals from `PAX/` classes only - PAD is
+  non-revenue and not summed), `ddl` (deadload total), `local_station`.
+- **`_ldm_si(raw_text)`** - captures the free-text SI remarks block (stops at
+  `END` or the ETX marker). Also parses the per-station breakdown line
+  `STATION FRE n POS n BAG p[/w] TRA n` into `station_breakdown`
+  (`fre`/`pos`/`bag`/`bag_weight`/`tra`).
+
+Facts keys: `reg`, `cabins`, `crew` (`{cockpit,cabin,total}`), `ac_type`,
+`si`, `station_breakdown`, `px6`, `px7`, `pax`, `px1`-`px3`, `ddl`,
+`local_station`, `basic_weight`, `balance_index`. These are the field names
+`INTERFACE_COLUMN_MAPPINGS` remaps (e.g. `PAX`→`AMG_PAX`, `REG`→`AMG_REG`,
+`SI`→`AMG_SIT`) via `apply_column_mappings`.
 
 ### `extract_transfer(raw_text) -> (dict, [dict])`
 

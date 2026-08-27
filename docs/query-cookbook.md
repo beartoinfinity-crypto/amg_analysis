@@ -11,7 +11,7 @@ Tables involved:
 | `messages` | raw parsed messages (framing bytes preserved in `raw_text`) |
 | `messages_readable` | view = `messages` + `message_text` (framing bytes stripped for display) |
 | `message_facts` | one row per extracted message: `family`, `facts_json` (JSON object) |
-| `message_segments` | repeating rows (PTM transfers, FWD hops): `seq`, `data_json` (JSON object) |
+| `message_segments` | repeating rows (PTM transfers, FWD hops, LDM destination segments): `seq`, `data_json` (JSON object) |
 | `messages_fts` | FTS5 index over `raw_text`; query via `MATCH` on `rowid` |
 | `archives` | ingested archive names + sizes (used by dedup logic) |
 
@@ -131,18 +131,63 @@ WHERE family='MOVEMENT' AND facts_json LIKE '%"IR1":"57"%';
 
 ## 4. LDM - loads
 
+Aggregated load facts (AHM 583):
+
 ```sql
-SELECT r.received_at, r.flight_number,
-       json_extract(f.facts_json, '$.cabins')       AS cabins,
-       json_extract(f.facts_json, '$.pax')          AS pax,
-       json_extract(f.facts_json, '$.pad')          AS pad,
-       json_extract(f.facts_json, '$.deadload')     AS deadload,
-       json_extract(f.facts_json, '$.crew')         AS crew,
-       json_extract(f.facts_json, '$.basic_weight') AS bw,
-       json_extract(f.facts_json, '$.balance_index') AS bi
+SELECT r.received_at, r.flight_number, r.flight_airport, r.flight_date,
+       json_extract(f.facts_json, '$.reg')           AS reg,
+       json_extract(f.facts_json, '$.pax')           AS pax_total,
+       json_extract(f.facts_json, '$.px6')           AS transit_pax,
+       json_extract(f.facts_json, '$.px7')           AS local_pax,
+       json_extract(f.facts_json, '$.px1')           AS first_class,
+       json_extract(f.facts_json, '$.px2')           AS business_class,
+       json_extract(f.facts_json, '$.px3')           AS economy_class,
+       json_extract(f.facts_json, '$.ddl')           AS deadload_total,
+       json_extract(f.facts_json, '$.local_station') AS local_station,
+       json_extract(f.facts_json, '$.crew')          AS crew,
+       json_extract(f.facts_json, '$.cabins')        AS cabin_config,
+       json_extract(f.facts_json, '$.si')            AS si_text,
+       json_extract(f.facts_json, '$.station_breakdown') AS station_breakdown,
+       json_extract(f.facts_json, '$.basic_weight')  AS basic_weight,
+       json_extract(f.facts_json, '$.balance_index') AS balance_index
 FROM messages_readable r
 JOIN message_facts f ON f.message_id = r.id
-WHERE r.msg_type = 'LDM';
+WHERE r.msg_type = 'LDM'
+  AND json_extract(f.facts_json, '$.pax') IS NOT NULL;
+```
+
+Per-destination segment rows:
+
+```sql
+SELECT r.received_at, r.flight_number,
+       json_extract(s.data_json, '$.dest')        AS dest,
+       json_extract(s.data_json, '$.adults')      AS adults,
+       json_extract(s.data_json, '$.children')    AS children,
+       json_extract(s.data_json, '$.infants')     AS infants,
+       json_extract(s.data_json, '$.pax_total')   AS pax,
+       json_extract(s.data_json, '$.deadload')    AS deadload,
+       json_extract(s.data_json, '$.classes')     AS cabin_pax,
+       json_extract(s.data_json, '$.pads')        AS pads,
+       json_extract(s.data_json, '$.categories')  AS categories,
+       json_extract(s.data_json, '$.nil_traffic') AS nil_traffic
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+JOIN message_segments s ON s.message_id = r.id
+WHERE r.msg_type = 'LDM'
+ORDER BY r.received_at DESC, s.seq;
+```
+
+Flights touching a given destination (e.g. all LDM with a HKG segment):
+
+```sql
+SELECT r.received_at, r.flight_number
+FROM messages_readable r
+JOIN message_segments s ON s.message_id = r.id
+JOIN message_facts f ON f.message_id = r.id
+WHERE r.msg_type = 'LDM'
+  AND json_extract(s.data_json, '$.dest') = 'HKG'
+  AND json_extract(s.data_json, '$.pax_total') > 0
+ORDER BY r.received_at DESC;
 ```
 
 ## 5. DIV - diversions
