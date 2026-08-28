@@ -106,7 +106,7 @@ def test_ldm_extracts_weights_pax_and_cabin_totals(tmp_path, make_archive):
     assert facts["balance_index"] == 39.5
     assert facts["px7"] == 244
     assert facts["px6"] == 0
-    assert facts["pax"] == 244
+    assert facts["AMG_PAX"] == 244
 
 
 def test_ldm_parses_destination_segments_and_aggregates(tmp_path, make_archive):
@@ -134,7 +134,7 @@ def test_ldm_parses_destination_segments_and_aggregates(tmp_path, make_archive):
     assert segs[1]["adults"] == 12
     assert facts["px7"] == 149
     assert facts["px6"] == 12
-    assert facts["pax"] == 161
+    assert facts["AMG_PAX"] == 161
     assert facts["ddl"] == 4399 + 1000
 
 
@@ -158,7 +158,7 @@ def test_ldm_gender_detail_segments_and_cabin_classes(tmp_path, make_archive):
     assert segs[0]["pax_total"] == 206
     assert segs[0]["classes"] == {"first": 0, "business": 17, "economy": 189}
     assert segs[0]["pads"] == {"first": 0, "business": 1, "economy": 6}
-    assert facts["pax"] == 206
+    assert facts["AMG_PAX"] == 206
     assert facts["px2"] == 17
     assert facts["px3"] == 189
 
@@ -182,7 +182,7 @@ def test_ldm_nil_traffic_segment_contributes_nothing(tmp_path, make_archive):
         "SELECT data_json FROM message_segments ORDER BY seq")]
     assert segs[0]["nil_traffic"] is True
     assert facts["px6"] == 12
-    assert facts["pax"] == 12
+    assert facts["AMG_PAX"] == 12
 
 
 def test_ldm_captures_si_text_and_station_breakdown(tmp_path, make_archive):
@@ -203,14 +203,15 @@ def test_ldm_captures_si_text_and_station_breakdown(tmp_path, make_archive):
     facts = json.loads(
         con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
     )
-    assert "RETURN" not in facts["si"]
-    assert "NOTOC" in facts["si"]
+    assert "RETURN" not in facts["AMG_SIT"]
+    assert "NOTOC" in facts["AMG_SIT"]
     assert facts["station_breakdown"] == {"station": "HKG", "fre": 44, "pos": 0,
                                           "bag": 1628, "tra": 0}
 
 
 def test_ldm_supports_interface_column_mapping(tmp_path, make_archive):
     from amg.extractors import INTERFACE_COLUMN_MAPPINGS
+    snapshot = dict(INTERFACE_COLUMN_MAPPINGS)
     INTERFACE_COLUMN_MAPPINGS.update({
         "REG": "AMG_REG", "PAX": "AMG_PAX", "SI": "AMG_SIT", "DDL": "DDL",
     })
@@ -235,6 +236,7 @@ def test_ldm_supports_interface_column_mapping(tmp_path, make_archive):
         assert facts["DDL"] == 4399
     finally:
         INTERFACE_COLUMN_MAPPINGS.clear()
+        INTERFACE_COLUMN_MAPPINGS.update(snapshot)
 
 
 def test_ptm_extracts_transfer_segments_without_names(tmp_path, make_archive):

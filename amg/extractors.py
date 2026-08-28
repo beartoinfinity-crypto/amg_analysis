@@ -89,7 +89,17 @@ FAMILIES = {
 
 ASM_AIRLINES_TO_PROCESS: set = set()
 
-INTERFACE_COLUMN_MAPPINGS: dict = {}
+# Data segregation: LDM DB-facing fields that must be remapped to AODB target
+# columns (AHM 583 spec section 4). These protect real-time FIDS values by
+# staging them under AMG_*. Direct columns (CRW, DDL, PX1-PX7) take no remap,
+# so they are intentionally absent — apply_column_mappings leaves their keys
+# untouched. The ldm_remap view in cli.py is built from this mapping.
+INTERFACE_COLUMN_MAPPINGS: dict = {
+    "REG": "AMG_REG",
+    "PAX": "AMG_PAX",
+    "SI": "AMG_SIT",
+    "SIT": "AMG_SIT",  # spec alias for the SI remarks field
+}
 
 
 class MalformedMessage(ValueError):
@@ -790,7 +800,10 @@ def extract_message(msg_type, raw_text):
     else:
         facts, segments = EXTRACTORS[msg_type](raw_text)
     facts["line_limit_violations"] = count_line_violations(raw_text)
-    facts = apply_column_mappings(facts)
+    # Data segregation applies to LDM load facts only (AHM 583 spec section 4);
+    # other families keep their natural keys so the mapping can't corrupt them.
+    if family == "LOAD":
+        facts = apply_column_mappings(facts)
     return {"family": family, "facts": facts, "segments": segments}
 
 
