@@ -106,6 +106,51 @@ SELECT id, received_at, station, status, msg_type, priority, destination, origin
 FROM messages;
 """
 
+# LDM facts that map onto AODB columns, in display order. The target column
+# defaults to the fact's own name; INTERFACE_COLUMN_MAPPINGS remaps it (e.g.
+# PAX -> AMG_PAX). These are the DB-facing fields from the AHM 583 spec.
+LDM_COLUMN_FIELDS = [
+    ("reg", "REG"),
+    ("pax", "PAX"),
+    ("si", "SI"),
+    ("crew", "CRW"),
+    ("ddl", "DDL"),
+    ("px1", "PX1"),
+    ("px2", "PX2"),
+    ("px3", "PX3"),
+    ("px6", "PX6"),
+    ("px7", "PX7"),
+]
+
+
+def _remap_view_sql():
+    """Build a view showing, per LDM, each DB column and the value that would
+    land there after INTERFACE_COLUMN_MAPPINGS remapping.
+
+    The target column comes from INTERFACE_COLUMN_MAPPINGS; facts it doesn't
+    list keep their default column (documented above).
+    """
+    cols, selects = [], []
+    for fact_key, default_col in LDM_COLUMN_FIELDS:
+        target = extractors.INTERFACE_COLUMN_MAPPINGS.get(fact_key.upper(), default_col)
+        quoted = target.replace('"', '""')
+        cols.append(f'"{quoted}"')
+        selects.append(f"json_extract(f.facts_json, '$.{fact_key}') AS \"{quoted}\"")
+    cols_sql = ", ".join(cols)
+    selects_sql = ",\n       ".join(selects)
+    return f"""
+CREATE VIEW IF NOT EXISTS ldm_remap AS
+SELECT r.id AS message_id, r.received_at, r.flight_number, r.flight_airport,
+       {selects_sql}
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+WHERE r.msg_type = 'LDM';
+"""
+
+
+def build_schema():
+    return SCHEMA + _remap_view_sql()
+
 FLIGHT_LINE = re.compile(
     r"^([A-Z0-9]{2,3}\d{1,4}[A-Z]?)/(\d{1,2})\.([A-Z0-9-]+)(?:\.([A-Z]{3}))?", re.ASCII
 )
@@ -371,7 +416,7 @@ def ingest_archive(archive_path, con):
 def ingest_archives(archive_paths, db_path, progress=None, should_stop=None):
     _probe_writable(db_path)
     con = sqlite3.connect(db_path)
-    con.executescript(SCHEMA)
+    con.executescript(build_schema())
     seen = dict(con.execute("SELECT name, size FROM archives"))
     ingested = skipped = failed = 0
     done = 0
@@ -419,7 +464,7 @@ def _probe_writable(db_path):
 def rebuild_archives(archive_paths, db_path, progress=None, should_stop=None):
     _probe_writable(db_path)
     con = sqlite3.connect(db_path)
-    con.executescript(SCHEMA)
+    con.executescript(build_schema())
     con.execute("DELETE FROM messages")
     con.execute("DELETE FROM archives")
     con.commit()
