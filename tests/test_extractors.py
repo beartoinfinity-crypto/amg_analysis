@@ -196,6 +196,7 @@ def test_ldm_captures_si_text_and_station_breakdown(tmp_path, make_archive):
         "BW 48600 BI 42.00\r\n"
         "HKG FRE 44 POS 0 BAG 1628 TRA 0 BAGP 139\r\n"
         "NOTOC : NO\r\n"
+        "REMARK  LINE   WITH   EXTRA   SPACES\r\n"
         "\x03\r\n"
     )
     con = ingest_text(tmp_path, make_archive, body)
@@ -205,6 +206,8 @@ def test_ldm_captures_si_text_and_station_breakdown(tmp_path, make_archive):
     )
     assert "RETURN" not in facts["AMG_SIT"]
     assert "NOTOC" in facts["AMG_SIT"]
+    assert "REMARK LINE WITH EXTRA SPACES" in facts["AMG_SIT"]
+    assert "  " not in facts["AMG_SIT"]
     assert facts["station_breakdown"] == {"station": "HKG", "fre": 44, "pos": 0,
                                           "bag": 1628, "tra": 0}
 

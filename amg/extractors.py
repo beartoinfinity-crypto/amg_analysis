@@ -469,7 +469,10 @@ def _ldm_si(raw_text):
                 if match.group("bag_weight"):
                     breakdown["bag_weight"] = int(match.group("bag_weight"))
             si_lines.append(stripped)
-    return " ".join(si_lines).strip(), breakdown
+    # Collapse runs of whitespace to a single space across the whole SI block.
+    si_text = " ".join(si_lines).strip()
+    si_text = re.sub(r"\s{2,}", " ", si_text)
+    return si_text, breakdown
 
 
 def extract_load(raw_text):
