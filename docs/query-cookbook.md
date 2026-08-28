@@ -193,12 +193,15 @@ ORDER BY r.received_at DESC;
 ### Expected values of the remap columns
 
 `INTERFACE_COLUMN_MAPPINGS` (in `amg/extractors.py`) remaps LDM facts onto
-their AODB target columns when the index is built - e.g. `PAX` -> `AMG_PAX`.
-The `ldm_remap` view materialises, per LDM message, each DB-facing column and
-the value that would be committed there **after** remapping. Column names
-reflect the current `INTERFACE_COLUMN_MAPPINGS` (unlisted facts keep their
-default name, so with no mapping configured they appear as `REG`/`PAX`/`SI`/
-`CRW`/`DDL`/`PX1`-`PX7`).
+their AODB target columns when the index is built - e.g. `PAX` -> `AMG_PAX`,
+`REG` -> `AMG_REG`, `SI` -> `AMG_SIT`. Remapped facts are also **persisted**
+in `message_facts.facts_json` under their remapped key. The `ldm_remap` view
+materialises, per LDM message, each DB-facing column and the value that would
+be committed there **after** remapping, reading the persisted key. Column names
+reflect the current `INTERFACE_COLUMN_MAPPINGS` (remapped fields appear as
+`AMG_*`; unremapped `CRW`/`DDL`/`PX1`-`PX7` keep their names). The view is
+dropped and recreated on every rebuild, so its columns track the mapping.
+Direct-facing MVT etc. are untouched - remapping is scoped to the LOAD family.
 
 ```sql
 -- Everything that would be written for each departing/arriving flight
