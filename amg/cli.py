@@ -132,10 +132,15 @@ def _remap_view_sql():
     """
     cols, selects = [], []
     for fact_key, default_col in LDM_COLUMN_FIELDS:
-        target = extractors.INTERFACE_COLUMN_MAPPINGS.get(fact_key.upper(), default_col)
+        up = fact_key.upper()
+        target = extractors.INTERFACE_COLUMN_MAPPINGS.get(up, default_col)
+        # The JSON key reflects the fact as persisted after apply_column_mappings:
+        # remapped facts are stored under their target (AMG_*), unremapped ones
+        # keep their natural lowercase name (px7, ddl, crew).
+        stored = extractors.INTERFACE_COLUMN_MAPPINGS.get(up, fact_key)
         quoted = target.replace('"', '""')
         cols.append(f'"{quoted}"')
-        selects.append(f"json_extract(f.facts_json, '$.{fact_key}') AS \"{quoted}\"")
+        selects.append(f"json_extract(f.facts_json, '$.{stored}') AS \"{quoted}\"")
     cols_sql = ", ".join(cols)
     selects_sql = ",\n       ".join(selects)
     # DROP first: the view's columns are baked in at CREATE time, so a rebuild
