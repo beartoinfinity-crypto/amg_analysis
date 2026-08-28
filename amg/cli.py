@@ -138,8 +138,11 @@ def _remap_view_sql():
         selects.append(f"json_extract(f.facts_json, '$.{fact_key}') AS \"{quoted}\"")
     cols_sql = ", ".join(cols)
     selects_sql = ",\n       ".join(selects)
+    # DROP first: the view's columns are baked in at CREATE time, so a rebuild
+    # must recreate it whenever INTERFACE_COLUMN_MAPPINGS changes.
     return f"""
-CREATE VIEW IF NOT EXISTS ldm_remap AS
+DROP VIEW IF EXISTS ldm_remap;
+CREATE VIEW ldm_remap AS
 SELECT r.id AS message_id, r.received_at, r.flight_number, r.flight_airport,
        {selects_sql}
 FROM messages_readable r
