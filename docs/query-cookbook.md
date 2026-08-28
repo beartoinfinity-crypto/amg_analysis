@@ -190,6 +190,41 @@ WHERE r.msg_type = 'LDM'
 ORDER BY r.received_at DESC;
 ```
 
+### Expected values of the remap columns
+
+`INTERFACE_COLUMN_MAPPINGS` (in `amg/extractors.py`) remaps LDM facts onto
+their AODB target columns when the index is built - e.g. `PAX` -> `AMG_PAX`.
+The `ldm_remap` view materialises, per LDM message, each DB-facing column and
+the value that would be committed there **after** remapping. Column names
+reflect the current `INTERFACE_COLUMN_MAPPINGS` (unlisted facts keep their
+default name, so with no mapping configured they appear as `REG`/`PAX`/`SI`/
+`CRW`/`DDL`/`PX1`-`PX7`).
+
+```sql
+-- Everything that would be written for each departing/arriving flight
+SELECT received_at, flight_number, flight_airport,
+       REG  AS aircraft_reg,
+       PAX  AS pax_on_board,
+       PX6  AS transit, PX7 AS local,
+       DDL  AS deadload,
+       CRW  AS crew,
+       SI   AS remarks_text
+FROM ldm_remap
+WHERE PAX > 0
+ORDER BY received_at DESC;
+```
+
+When a remap is configured (`PAX -> AMG_PAX` etc.), query by the remapped
+column names - the view's columns change accordingly:
+
+```sql
+SELECT received_at, flight_number, AMG_REG, AMG_PAX, AMG_SIT, PX6, PX7, DDL
+FROM ldm_remap
+WHERE AMG_PAX > 0
+ORDER BY received_at DESC
+LIMIT 20;
+```
+
 ## 5. DIV - diversions
 
 ```sql
