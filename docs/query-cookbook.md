@@ -221,9 +221,11 @@ When a remap is configured (`PAX -> AMG_PAX` etc.), query by the remapped
 column names - the view's columns change accordingly:
 
 ```sql
-SELECT received_at, flight_number, AMG_REG, AMG_PAX, AMG_SIT, PX6, PX7, DDL
-FROM ldm_remap
+SELECT l.*, r.message_text,r.flight_date
+FROM ldm_remap l
+JOIN messages_readable r ON message_id = r.id
 WHERE AMG_PAX > 0
+and r.flight_date ='20260820'
 ORDER BY received_at DESC
 LIMIT 20;
 ```
@@ -298,18 +300,61 @@ WHERE family = 'ASSISTANCE'
   );
 ```
 
-## 8. PNL / ADL - counts only (PII is stripped by policy)
+## 8. PNL / ADL - RP 1708 passenger counts (PII is stripped by policy)
 
-Stored text is a `[REDACTED]` skeleton; the numbers live in facts.
+Stored text is a `[REDACTED]` skeleton; the numbers live in facts. Each message
+is one `message_facts` row (flight element, aggregation) plus one
+`message_segments` row per destination/cabin-class leg.
+
+Per-leg destination breakdown (declared vs. actually parsed from name rows):
 
 ```sql
-SELECT received_at, flight_number, flight_date, part_number,
-       json_extract(facts_json, '$.name_rows')        AS name_rows,
-       json_extract(facts_json, '$.identifier_rows')  AS identifier_rows,
-       json_extract(facts_json, '$.changes')          AS adl_changes
+SELECT r.received_at, r.flight_number,
+       json_extract(s.data_json, '$.dest')           AS dest,
+       json_extract(s.data_json, '$.cabin_class')    AS cabin,
+       json_extract(s.data_json, '$.declared_total') AS declared,
+       json_extract(s.data_json, '$.actual_parsed_pax') AS parsed,
+       json_extract(s.data_json, '$.pad_total')      AS pad
 FROM messages_readable r
 JOIN message_facts f ON f.message_id = r.id
-WHERE msg_type IN ('PNL', 'ADL')
+JOIN message_segments s ON s.message_id = r.id
+WHERE r.msg_type IN ('PNL', 'ADL')
+ORDER BY r.received_at DESC, s.seq;
+```
+
+Multi-leg routing metrics (PXE/PX6) and PNL aggregate view. `pnl_remap` is a
+dedicated view (like `ldm_remap`) turning the PNL/ADL facts into columns -
+flight element, boarding airport, part number, `pxe`/`px6`, `no_action`,
+`pax_on_board` (sum of all leg declared totals) and `segment_count`:
+
+```sql
+SELECT received_at, msg_type, flight_number, flight_airport, boarding_airport,
+       part_number, name_rows, pxe, px6, no_action,
+       arrival_action, departure_action, pax_on_board, segment_count
+FROM pnl_remap
+WHERE pax_on_board > 0
+ORDER BY received_at DESC
+LIMIT 100;
+```
+
+PNL/ADL routed into and out of HKG (no-action legs filtered out):
+
+```sql
+SELECT received_at, flight_number, boarding_airport, pxe, px6, pax_on_board
+FROM pnl_remap
+WHERE no_action = 0
+ORDER BY received_at DESC
+LIMIT 100;
+```
+
+SSR tallies by code (anonymised - codes only, no names/phones):
+
+```sql
+SELECT received_at, flight_number, json_extract(facts_json, '$.ssrs') AS ssrs
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+WHERE r.msg_type IN ('PNL', 'ADL')
+  AND json_extract(facts_json, '$.ssrs') IS NOT NULL
 ORDER BY received_at DESC;
 ```
 
@@ -422,4 +467,210 @@ SELECT received_at, msg_type, flight_number, message_text
 FROM messages_readable
 WHERE flight_number = 'CI5825'
 ORDER BY received_at DESC;
+```
+
+## 12. Per-message-type queries
+
+One query per family. Each `msg_type` maps to exactly one family; the family
+(facts) schema is identical for every type it serves, so a single query covers
+them:
+
+| Family | Serves msg_type | Headline fields |
+| --- | --- | --- |
+| MOVEMENT | MVT, MVA | times (AD/EO/EL/...), destination, abp/adp |
+| DIVERSION | DIV | dva, eta, can |
+| LOAD | LDM | pax (AMG_PAX), px1-3, px6, px7, deadload, reg, crew |
+| TRANSFER | PTM | per-segment transfers (flight, airports, cabin/bags) |
+| ASSISTANCE | PSM, PAL, CAL | assist_codes, pax_total |
+| NAME_LIST | PNL, ADL | flight element, pxe/px6, ssrs, per-leg pax |
+| FORWARD | FWD | crew, components, nationalities, per-hop rows |
+| SCHEDULE | ASM | airline, muted |
+
+Every query appends `r.message_text` — the stored (framing-stripped) original —
+so you can jump from a fact to the exact source message. Note PNL/ADL text is
+redacted to `[REDACTED]` at storage by policy (see `redact_text` in
+architecture.md); the structured facts below are extracted from the pre-redaction
+text and remain PII-free.
+
+### 12.1 MOVEMENT (MVT, MVA)
+
+```sql
+SELECT r.received_at, r.flight_number, r.flight_airport,
+       json_extract(f.facts_json, '$.destination')     AS dest,
+       json_extract(f.facts_json, '$.times.AD.time')   AS actual_dep,
+       json_extract(f.facts_json, '$.times.EO.time')   AS est_off_block,
+       json_extract(f.facts_json, '$.times.EL.time')   AS est_on_block,
+       json_extract(f.facts_json, '$.times.TD.time')   AS actual_off_block,
+       json_extract(f.facts_json, '$.times.AA.time')   AS actual_arrive,
+       json_extract(f.facts_json, '$.adp')             AS adp,
+       json_extract(f.facts_json, '$.abp')             AS abp,
+       r.message_text
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+WHERE r.msg_type IN ('MVT', 'MVA')
+ORDER BY r.received_at DESC;
+```
+
+### 12.2 DIVERSION (DIV)
+
+```sql
+SELECT r.received_at, r.flight_number,
+       json_extract(f.facts_json, '$.dva')   AS diversion_airport,
+       json_extract(f.facts_json, '$.eta')   AS eta,
+       json_extract(f.facts_json, '$.can')   AS cancellation,
+       r.message_text
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+WHERE r.msg_type = 'DIV'
+ORDER BY r.received_at DESC;
+```
+
+### 12.3 LOAD (LDM)
+
+```sql
+SELECT r.received_at, r.flight_number, r.flight_airport,
+       json_extract(f.facts_json, '$.AMG_REG')   AS reg,
+       json_extract(f.facts_json, '$.AMG_PAX')   AS pax,
+       json_extract(f.facts_json, '$.px1')       AS first,
+       json_extract(f.facts_json, '$.px2')       AS business,
+       json_extract(f.facts_json, '$.px3')       AS economy,
+       json_extract(f.facts_json, '$.px6')       AS transit,
+       json_extract(f.facts_json, '$.px7')       AS local,
+       json_extract(f.facts_json, '$.ddl')       AS deadload,
+       json_extract(f.facts_json, '$.crew')      AS crew,
+       json_extract(f.facts_json, '$.local_station') AS local_station,
+       r.message_text
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+WHERE r.msg_type = 'LDM'
+ORDER BY r.received_at DESC;
+```
+
+### 12.4 TRANSFER (PTM)
+
+```sql
+SELECT r.received_at, r.flight_number,
+       json_extract(s.data_json, '$.flight')      AS transfer_flight,
+       json_extract(s.data_json, '$.airports')    AS to_airport,
+       json_extract(s.data_json, '$.cabin_bags')  AS cabin_bags,
+       json_extract(s.data_json, '$.day')         AS day,
+       r.message_text
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+JOIN message_segments s ON s.message_id = r.id
+WHERE r.msg_type = 'PTM'
+ORDER BY r.received_at DESC, s.seq;
+```
+
+### 12.5 ASSISTANCE (PSM, PAL, CAL)
+
+```sql
+SELECT r.received_at, r.msg_type, r.flight_number,
+       json_extract(f.facts_json, '$.assist_codes') AS assist_codes,
+       json_extract(f.facts_json, '$.pax_total')    AS pax_total,
+       r.message_text
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+WHERE r.msg_type IN ('PSM', 'PAL', 'CAL')
+ORDER BY r.received_at DESC;
+```
+
+### 12.6 NAME_LIST (PNL, ADL)
+
+```sql
+SELECT r.received_at, r.msg_type, r.flight_number,
+       json_extract(f.facts_json, '$.boarding_airport') AS boarding,
+       json_extract(f.facts_json, '$.part_number')      AS part,
+       json_extract(f.facts_json, '$.name_rows')        AS name_rows,
+       json_extract(f.facts_json, '$.pxe')              AS pxe,
+       json_extract(f.facts_json, '$.px6')              AS px6,
+       json_extract(f.facts_json, '$.no_action')        AS no_action,
+       json_extract(f.facts_json, '$.ssrs')             AS ssrs,
+       r.message_text
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+WHERE r.msg_type IN ('PNL', 'ADL')
+ORDER BY r.received_at DESC;
+```
+
+Per-leg pax for a NAME_LIST message (dest / cabin / declared vs parsed):
+
+```sql
+SELECT r.received_at, r.flight_number,
+       json_extract(s.data_json, '$.dest')             AS dest,
+       json_extract(s.data_json, '$.cabin_class')      AS cabin,
+       json_extract(s.data_json, '$.declared_total')   AS declared,
+       json_extract(s.data_json, '$.actual_parsed_pax') AS parsed,
+       json_extract(s.data_json, '$.pad_total')        AS pad,
+       r.message_text
+FROM messages_readable r
+JOIN message_segments s ON s.message_id = r.id
+WHERE r.msg_type IN ('PNL', 'ADL')
+ORDER BY r.received_at DESC, s.seq;
+```
+
+Flights split across multiple parts (e.g. KE2012 = PART1..18) are stored as one
+row per part/message, each with its own `pxe`/`px6`. To consolidate to flight
+level, aggregate across parts by the flight identity. Caution: treating `SUM`
+as the flight PX6 assumes parts do not overlap legs — if a leg appears in
+several parts, the sum double-counts it. For a first-pass reconciliation this
+query is still the right shape:
+
+```sql
+SELECT r.flight_number, r.flight_airport,
+       json_extract(f.facts_json, '$.dep_month') AS dep_month,
+       COUNT(DISTINCT r.part_number)             AS parts,
+       SUM(json_extract(f.facts_json, '$.pxe'))  AS pxe_total,
+       SUM(json_extract(f.facts_json, '$.px6'))  AS px6_total
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+WHERE r.msg_type IN ('PNL', 'ADL')
+  AND json_extract(f.facts_json, '$.no_action') = 0
+GROUP BY r.flight_number, r.flight_airport,
+         json_extract(f.facts_json, '$.dep_month')
+ORDER BY pxe_total DESC;
+```
+
+### 12.7 FORWARD (FWD)
+
+```sql
+SELECT r.received_at, r.flight_number,
+       json_extract(f.facts_json, '$.crew')            AS crew,
+       json_extract(f.facts_json, '$.destination')     AS dest,
+       json_extract(f.facts_json, '$.hops')            AS hops,
+       json_extract(f.facts_json, '$.components')      AS components,
+       json_extract(f.facts_json, '$.nationalities')   AS nationalities,
+       r.message_text
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+WHERE r.msg_type = 'FWD'
+ORDER BY r.received_at DESC;
+```
+
+Per-hop rows for a FWD message:
+
+```sql
+SELECT r.received_at, r.flight_number,
+       json_extract(s.data_json, '$.hop')         AS hop,
+       json_extract(s.data_json, '$.flight')      AS flight,
+       json_extract(s.data_json, '$.destination') AS dest,
+       json_extract(s.data_json, '$.detail')      AS detail,
+       r.message_text
+FROM messages_readable r
+JOIN message_segments s ON s.message_id = r.id
+WHERE r.msg_type = 'FWD'
+ORDER BY r.received_at DESC, s.seq;
+```
+
+### 12.8 SCHEDULE (ASM)
+
+```sql
+SELECT r.received_at, r.flight_number,
+       json_extract(f.facts_json, '$.airline') AS airline,
+       json_extract(f.facts_json, '$.muted')   AS muted,
+       r.message_text
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+WHERE r.msg_type = 'ASM'
+ORDER BY r.received_at DESC;
 ```

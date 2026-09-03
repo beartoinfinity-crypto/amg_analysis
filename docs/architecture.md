@@ -275,10 +275,15 @@ assist codes kept).
 
 PSM/PAL/CAL: assist codes list. CAL also captures delta ops and pax total.
 
-### `extract_name_list(raw_text) -> (dict, str)`
+### `extract_name_list(raw_text) -> (dict, [dict])`
 
-PNL/ADL: counts name rows and identifier rows (or ADL changes). Returns
-facts dict and a fully-redacted text skeleton. Zero PII in storage.
+PNL/ADL: parses the flight element, destination-total legs, and name rows.
+Returns a facts dict (carrier, flight, boarding, `name_rows`,
+`identifier_rows`, CFG, per-code SSR tallies, PXE/PX6 routing aggregation,
+ADL `changes`) and per-(dest,class) segments in `message_segments` with
+`declared_total` / `pad_total` / `actual_parsed_pax`. Names are never stored.
+Redaction to `[REDACTED]` (count-only skeleton) is applied separately by
+`redact_text` — the extractor itself is PII-free by construction.
 
 ### `extract_forward(raw_text) -> (dict, [dict])`
 

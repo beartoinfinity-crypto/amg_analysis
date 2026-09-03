@@ -76,6 +76,18 @@ SI_BREAKDOWN_RE = re.compile(
 
 ASSIST_CODES = ("WCHR", "WCHC", "WCHS", "WCB", "DEAF", "BLND", "MEDA", "UMNR", "MAAS", "ESAN")
 
+# RP 1708 PNL/ADL (IATA PSCRM). Patterns tuned to the real corpus which matches
+# the spec's canonical forms (e.g. "EK0380/12AUG DXB PART1", "-HKG213Y-PAD005").
+PNL_FLIGHT_RE = re.compile(
+    r"^([A-Z]{2,3})([0-9]{1,4})([A-Z]?)\/([0-9]{2})([A-Z]{3})\s+"
+    r"([A-Z]{3})(?:\s+PART([0-9]+))?$",
+    re.ASCII,
+)
+PNL_DEST_RE = re.compile(r"^-([A-Z]{3})([0-9]{1,3})([A-Z])(?:-PAD([0-9]{1,3}))?$", re.ASCII)
+PNL_ANA_RE = re.compile(r"^ANA/([A-Z0-9]+)$", re.ASCII)
+PNL_NAME_COUNT_RE = re.compile(r"^([0-9]+)")
+SSR_SUMMARY_RE = re.compile(r"^(?:SSR|\.R/)\s*([A-Z]{2,4})(?=\s|/|$)", re.ASCII)
+
 FAMILIES = {
     "MVT": "MOVEMENT", "MVA": "MOVEMENT",
     "DIV": "DIVERSION",
@@ -628,26 +640,109 @@ def extract_assistance(raw_text):
 
 
 def extract_name_list(raw_text):
+    """Parse an RP 1708 PNL/ADL passenger count message.
+
+    Returns ``(facts, segments)``. Passenger names, record locators and SSR
+    contact detail are consumed only to tally counts — they are never emitted,
+    matching the count-only privacy policy for the NAME_LIST family.
+    """
     facts = {"family_kind": "NAME_LIST"}
+    lines = validate_lines(raw_text)
+
     cfg = CFG_RE.search(raw_text)
     if cfg:
         facts["cfg"] = cfg.group(1)
-    facts["name_rows"] = sum(1 for l in validate_lines(raw_text) if NAME_ROW_RE.match(l))
-    facts["identifier_rows"] = sum(
-        1 for l in validate_lines(raw_text) if IDENTIFIER_ROW_RE.match(l)
-    )
-    delta = {op: 0 for op in ("ADD", "DEL", "CHG")}
+
+    for line in lines:
+        flight = PNL_FLIGHT_RE.match(line.strip())
+        if flight:
+            facts["carrier"] = flight.group(1)
+            facts["flight_number"] = flight.group(2)
+            facts["suffix"] = flight.group(3) or ""
+            facts["dep_day"] = flight.group(4)
+            facts["dep_month"] = flight.group(5)
+            facts["boarding_airport"] = flight.group(6)
+            facts["part_number"] = int(flight.group(7)) if flight.group(7) else 1
+            break
+
+    for line in lines:
+        ana = PNL_ANA_RE.match(line.strip())
+        if ana:
+            facts["ana"] = ana.group(1)
+            break
+
+    segments = []
     current = None
-    for line in validate_lines(raw_text):
+    for line in lines:
+        stripped = line.strip()
+        dest = PNL_DEST_RE.match(stripped)
+        if dest:
+            segments.append({
+                "dest": dest.group(1),
+                "declared_total": int(dest.group(2)),
+                "cabin_class": dest.group(3),
+                "pad_total": int(dest.group(4)) if dest.group(4) else 0,
+                "actual_parsed_pax": 0,
+            })
+            current = len(segments) - 1
+            continue
+        if current is not None and NAME_ROW_RE.match(stripped):
+            count = PNL_NAME_COUNT_RE.match(stripped)
+            if count:
+                segments[current]["actual_parsed_pax"] += int(count.group(1))
+
+    facts["name_rows"] = sum(1 for l in lines if NAME_ROW_RE.match(l))
+    facts["identifier_rows"] = sum(1 for l in lines if IDENTIFIER_ROW_RE.match(l))
+
+    delta = {op: 0 for op in ("ADD", "DEL", "CHG")}
+    current_op = None
+    for line in lines:
         marker = OP_MARKER_RE.match(line.strip())
         if marker:
-            current = marker.group(1)
+            current_op = marker.group(1)
             continue
-        if NAME_ROW_RE.match(line) and current:
-            delta[current] += 1
+        if NAME_ROW_RE.match(line) and current_op:
+            delta[current_op] += 1
     if any(delta.values()):
         facts["changes"] = {op: n for op, n in delta.items() if n}
-    return facts
+
+    ssr_codes = {}
+    for line in lines:
+        m = SSR_SUMMARY_RE.match(line.strip())
+        if m:
+            code = m.group(1)
+            ssr_codes[code] = ssr_codes.get(code, 0) + 1
+    if ssr_codes:
+        facts["ssrs"] = ssr_codes
+
+    boarding = facts.get("boarding_airport")
+    if boarding is not None:
+        agg = _aggregate_pnl(segments, boarding)
+        facts.update(agg)
+
+    return facts, segments
+
+
+def _aggregate_pnl(segments, boarding):
+    """Aggregate PXE/PX6 given the boarding (sending) station and the inbound
+    destination legs, per RP 1708 section 4 for the HKG context.
+
+    - boarding == HKG        : departure context, PXE = all on board, PX6 nil.
+    - boarding upstream of HKG: arrival + departure, PXE = all, PX6 = downline.
+    - boarding downstream     : no action.
+    """
+    ordered = list(dict.fromkeys(s["dest"] for s in segments))
+    total = sum(s["declared_total"] for s in segments)
+    if boarding == "HKG":
+        return {"pxe": total, "px6": None,
+                "arrival_action": False, "departure_action": True, "no_action": False}
+    if "HKG" in ordered:
+        downline = ordered[ordered.index("HKG") + 1:]
+        px6 = sum(s["declared_total"] for s in segments if s["dest"] in downline)
+        return {"pxe": total, "px6": px6,
+                "arrival_action": True, "departure_action": True, "no_action": False}
+    return {"pxe": None, "px6": None,
+            "arrival_action": False, "departure_action": False, "no_action": True}
 
 
 def extract_forward(raw_text):
@@ -720,8 +815,8 @@ EXTRACTORS = {
     "PSM": lambda t: (extract_assistance(t), []),
     "PAL": lambda t: (extract_assistance(t), []),
     "CAL": lambda t: (extract_assistance(t), []),
-    "PNL": lambda t: (extract_name_list(t), []),
-    "ADL": lambda t: (extract_name_list(t), []),
+    "PNL": extract_name_list,
+    "ADL": extract_name_list,
     "FWD": lambda t: extract_forward(t),
 }
 

@@ -157,7 +157,56 @@ WHERE r.msg_type = 'LDM';
 
 
 def build_schema():
-    return SCHEMA + _remap_view_sql()
+    return SCHEMA + _remap_view_sql() + _pnl_view_sql()
+
+
+PNL_VIEW_COLUMNS = [
+    ("carrier", "carrier"),
+    ("flight_no", "flight_number"),
+    ("suffix", "suffix"),
+    ("dep_day", "dep_day"),
+    ("dep_month", "dep_month"),
+    ("boarding_airport", "boarding_airport"),
+    ("part_number", "part_number"),
+    ("cfg", "cfg"),
+    ("name_rows", "name_rows"),
+    ("identifier_rows", "identifier_rows"),
+    ("ssrs", "ssrs"),
+    ("pxe", "pxe"),
+    ("px6", "px6"),
+    ("no_action", "no_action"),
+    ("arrival_action", "arrival_action"),
+    ("departure_action", "departure_action"),
+    ("changes", "changes"),
+]
+
+
+def _pnl_view_sql():
+    """Analytics view over structured PNL/ADL facts (RP 1708).
+
+    Like ldm_remap but no INTERFACE_COLUMN_MAPPINGS involvement - NAME_LIST
+    facts are never remapped, so every column reads its natural key. Adds a
+    boarded total (`pax_on_board`) and destination-leg count derived from the
+    per-segment rows.
+    """
+    selects = [f"json_extract(f.facts_json, '$.{key}') AS \"{col}\"" for col, key in PNL_VIEW_COLUMNS]
+    selects_sql = ",\n       ".join(selects)
+    return f"""
+DROP VIEW IF EXISTS pnl_remap;
+CREATE VIEW pnl_remap AS
+SELECT r.id AS message_id, r.received_at, r.msg_type, r.flight_number,
+       r.flight_airport, r.flight_date,
+       {selects_sql},
+       COALESCE(SUM(CASE WHEN json_valid(s.data_json) THEN
+                       json_extract(s.data_json, '$.declared_total') END), 0)
+         AS pax_on_board,
+       COUNT(s.id) AS segment_count
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+LEFT JOIN message_segments s ON s.message_id = r.id
+WHERE r.msg_type IN ('PNL', 'ADL')
+GROUP BY r.id;
+"""
 
 FLIGHT_LINE = re.compile(
     r"^([A-Z0-9]{2,3}\d{1,4}[A-Z]?)/(\d{1,2})\.([A-Z0-9-]+)(?:\.([A-Z]{3}))?", re.ASCII
@@ -473,9 +522,17 @@ def rebuild_archives(archive_paths, db_path, progress=None, should_stop=None):
     _probe_writable(db_path)
     con = sqlite3.connect(db_path)
     con.executescript(build_schema())
+    # Clear every derived table, not just the message table: message ids restart
+    # at 1 after the delete (no AUTOINCREMENT), so stale fact/segment rows from a
+    # previous run would otherwise collide with the freshly re-ingested rows.
+    con.execute("DELETE FROM message_segments")
+    con.execute("DELETE FROM message_facts")
     con.execute("DELETE FROM messages")
     con.execute("DELETE FROM archives")
     con.commit()
+    # Reclaim the pages freed by the DELETEs above. DELETE alone leaves the file
+    # sized as-is; VACUUM rewrites it so a Full rebuild also shrinks the file.
+    con.execute("VACUUM")
     con.close()
     return ingest_archives(archive_paths, db_path, progress=progress,
                            should_stop=should_stop)

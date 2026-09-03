@@ -331,6 +331,181 @@ def test_name_lists_are_fully_redacted_with_counts_only(tmp_path, make_archive):
         assert pii not in text, pii
 
 
+def test_pnl_extracts_flight_element_facts(tmp_path, make_archive):
+    body = (
+        "\r\n\x01QD HKGTSXH\r\n"
+        ".DXBRCEK 111840\r\n"
+        "\x02PNL\r\n"
+        "EK0380/12AUG DXB PART1\r\n"
+        "-HKG002F\r\n"
+        "-HKG023J\r\n"
+        "-HKG017W\r\n"
+        "-HKG213Y\r\n"
+        "ENDPNL\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["carrier"] == "EK"
+    assert facts["flight_number"] == "0380"
+    assert facts["suffix"] == ""
+    assert facts["dep_day"] == "12"
+    assert facts["dep_month"] == "AUG"
+    assert facts["boarding_airport"] == "DXB"
+    assert facts["part_number"] == 1
+
+
+def test_pnl_extracts_destination_segments_and_class_totals(tmp_path, make_archive):
+    body = (
+        "\r\n\x01QD HKGTSXH\r\n"
+        ".DXBRCEK 111840\r\n"
+        "\x02PNL\r\n"
+        "EK0380/12AUG DXB PART1\r\n"
+        "-HKG002F\r\n"
+        "-HKG023J-PAD005\r\n"
+        "-HKG017W\r\n"
+        "-HKG213Y\r\n"
+        "ENDPNL\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    segs = [json.loads(r[0]) for r in con.execute(
+        "SELECT data_json FROM message_segments ORDER BY seq")]
+    assert len(segs) == 4
+    assert segs[0] == {"dest": "HKG", "cabin_class": "F", "declared_total": 2,
+                       "pad_total": 0, "actual_parsed_pax": 0}
+    assert segs[1]["cabin_class"] == "J" and segs[1]["declared_total"] == 23 and segs[1]["pad_total"] == 5
+    assert segs[2]["cabin_class"] == "W" and segs[2]["declared_total"] == 17
+    assert segs[3]["cabin_class"] == "Y" and segs[3]["declared_total"] == 213
+
+
+def test_pnl_aggregates_pxe_px6_for_upstream_boarding(tmp_path, make_archive):
+    # PNL sent from SYD with legs SIN -> HKG -> SFO -> JFK: arrival at HKG
+    # carries everyone downline; PX6 is only the HKG further-stops (SFO, JFK).
+    body = (
+        "\r\n\x01QD HKGTSXH\r\n"
+        ".SYDXSIN 060800\r\n"
+        "\x02PNL\r\n"
+        "SY101/06AUG SIN PART1\r\n"
+        "-SIN044Y\r\n"
+        "-SIN012J\r\n"
+        "-HKG180Y\r\n"
+        "-SFO120Y\r\n"
+        "-JFK060Y\r\n"
+        "ENDPNL\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["boarding_airport"] == "SIN"
+    assert facts["arrival_action"] is True
+    assert facts["departure_action"] is True
+    assert facts["pxe"] == 44 + 12 + 180 + 120 + 60
+    assert facts["px6"] == 120 + 60
+
+
+def test_pnl_hkg_boarding_sets_departure_only(tmp_path, make_archive):
+    # PNL sent from HKG itself: arrival gets no action, PX6 stays nil.
+    body = (
+        "\r\n\x01QD HKGTSXH\r\n"
+        ".HKGDMK 130900\r\n"
+        "\x02PNL\r\n"
+        "SL0365/13AUG HKG PART1\r\n"
+        "-DMK173Y-PAD000\r\n"
+        "ENDPNL\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["boarding_airport"] == "HKG"
+    assert facts["arrival_action"] is False
+    assert facts["departure_action"] is True
+    assert facts["no_action"] is False
+    assert facts["pxe"] == 173
+    assert facts["px6"] is None
+
+
+def test_pnl_downstream_boarding_is_no_action(tmp_path, make_archive):
+    # PNL sent from SFO (already past HKG): neither arrival nor departure.
+    body = (
+        "\r\n\x01QD HKGTSXH\r\n"
+        ".SFOJFK 230400\r\n"
+        "\x02PNL\r\n"
+        "UA088/23AUG SFO PART1\r\n"
+        "-JFK090Y\r\n"
+        "ENDPNL\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["no_action"] is True
+    assert facts["arrival_action"] is False
+    assert facts["departure_action"] is False
+    assert facts["pxe"] is None and facts["px6"] is None
+
+
+def test_pnl_accumulates_actual_parsed_pax_from_name_rows(tmp_path, make_archive):
+    body = (
+        "\r\n\x01QD HKGTSXH\r\n"
+        ".HKGDMK 130900\r\n"
+        "\x02PNL\r\n"
+        "SL0365/13AUG HKG PART1\r\n"
+        "-DMK173Y-PAD000\r\n"
+        "2SMITH/JOHNMR\r\n"
+        "3JONES/FREDMR\r\n"
+        "1ZZ/ZZZZMR\r\n"
+        "ENDPNL\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    segs = [json.loads(r[0]) for r in con.execute(
+        "SELECT data_json FROM message_segments ORDER BY seq")]
+    assert segs[0]["actual_parsed_pax"] == 6
+    assert segs[0]["declared_total"] == 173
+
+
+def test_pnl_tallies_ssr_codes_and_keeps_import_pii_out_of_facts(tmp_path, make_archive):
+    body = (
+        "\r\n\x01QD HKGTSXH\r\n"
+        ".HKGDMK 130900\r\n"
+        "\x02PNL\r\n"
+        "SL0365/13AUG HKG PART1\r\n"
+        "-DMK173Y-PAD000\r\n"
+        "SSR CTCM AA HK1/16312352108-1CUMMINGS/GABRIELLE\r\n"
+        "SSR CTCM AA HK1/55221144705-1SMITH/JOHNMR\r\n"
+        "SSR WCHR AA HK1/2-1JONES/FREDMR\r\n"
+        ".R/FBA 1PC\r\n"
+        "OSI AA CTCT SEA EXPEDIA API USER\r\n"
+        "ENDPNL\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["ssrs"] == {"CTCM": 2, "WCHR": 1, "FBA": 1}
+    # PII must not surface in the structured facts
+    as_text = json.dumps(facts)
+    for pii in ("16312352108", "55221144705", "CUMMINGS", "GABRIELLE",
+                "SMITH", "JOHN", "JONES", "FRED", "SEA", "EXPEDIA"):
+        assert pii not in as_text, pii
+
+
 def test_forward_extracts_header_components_nationalities_and_rows(tmp_path, make_archive):
     body = (
         "FWD\r\n"
