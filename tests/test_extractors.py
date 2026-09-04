@@ -587,6 +587,28 @@ def test_pnl_burst_view_computes_px6_for_upstream_boarding(tmp_path, make_archiv
     assert dests == {"HKG": 10, "SYD": 120, "AKL": 30}
 
 
+def test_pnl_burst_view_downstream_boarding_has_no_px6(tmp_path, make_archive):
+    # Downstream station (no HKG leg on the routing) sends a complete burst:
+    # no_action - both burst_pxe and burst_px6 are NULL, matching the
+    # extractor's _aggregate_pnl convention.
+    lines = [
+        "\r\n\x01QD HKGTSXH\r\n",
+        ".SINPNKE 221053\r\n",
+        "\x02PNL\r\n",
+        "KE2013/23AUG SIN PART1\r\n",
+        "-KUL050Y\r\n",
+        "ENDPNL\r\n",
+        "\x03\r\n",
+    ]
+    con = ingest_text(tmp_path, make_archive, "".join(lines))
+    row = con.execute(
+        "SELECT * FROM pnl_burst"
+    ).fetchone()
+    assert row["action"] == "no_action"
+    assert row["burst_px6"] is None
+    assert row["complete"] == 1
+
+
 def test_pnl_aggregates_pxe_px6_for_upstream_boarding(tmp_path, make_archive):
     # PNL sent from SYD with legs SIN -> HKG -> SFO -> JFK: arrival at HKG
     # carries everyone downline; PX6 is only the HKG further-stops (SFO, JFK).

@@ -289,12 +289,12 @@ meta AS (
 totals AS (
   -- assembled burst-level PXE, and PX6 (downline of HKG) when the burst
   -- boards upstream of HKG; departure-only bursts get no PX6, downstream
-  -- (no HKG leg) bursts have neither.
+  -- (no HKG leg) bursts have neither - NULL, matching _aggregate_pnl.
   SELECT b.burst_key,
          SUM(b.declared_total) AS burst_pxe,
          CASE WHEN m.boarding_airport = 'HKG' THEN NULL
-              ELSE SUM(CASE WHEN h.hkg_seen IS NOT NULL
-                            AND b.first_seen > h.hkg_seen
+              WHEN h.hkg_seen IS NULL THEN NULL
+              ELSE SUM(CASE WHEN b.first_seen > h.hkg_seen
                             THEN b.declared_total ELSE 0 END)
          END AS burst_px6
   FROM blocks b
