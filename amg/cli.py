@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS messages (
   flight_date TEXT,
   part_number INTEGER,
   raw_text TEXT NOT NULL,
+  raw_text_plain TEXT,
   parse_error TEXT,
   source_archive TEXT NOT NULL,
   source_file TEXT NOT NULL,
@@ -102,7 +103,9 @@ SELECT id, received_at, station, status, msg_type, priority, destination, origin
        flight_number, aircraft_reg, flight_airport, flight_date, part_number,
        source_archive, source_file,
        replace(replace(replace(raw_text, char(1), ''), char(2), ''), char(3), '')
-         AS message_text
+         AS message_text,
+       replace(replace(replace(raw_text_plain, char(1), ''), char(2), ''), char(3), '')
+         AS message_text_plain
 FROM messages;
 """
 
@@ -396,11 +399,13 @@ def ingest_archive(archive_path, con):
             stem, suffix = posixpath.splitext(posixpath.basename(rel))
             parse_error = None
             extraction = None
+            plain = None
             try:
                 original = tar.extractfile(member).read().decode("latin-1")
                 envelope = parse_envelope(original)
                 extraction = extractors.extract_message(envelope["msg_type"], original)
                 raw = extractors.redact_text(envelope["msg_type"], original) or original
+                plain = original
             except Exception as error:
                 raw = ""
                 envelope = {"msg_type": "OTHER", "priority": None, "destination": None,
@@ -427,6 +432,7 @@ def ingest_archive(archive_path, con):
                     normalize_flight_date(envelope["flight_date"], archive_path.name),
                     envelope["part_number"],
                     raw,
+                    plain,
                     parse_error,
                     archive_path.name,
                     rel,
@@ -436,8 +442,8 @@ def ingest_archive(archive_path, con):
         "INSERT OR IGNORE INTO messages"
         " (received_at, station, status, msg_type, priority, destination, origin,"
         "  flight_number, aircraft_reg, flight_airport, flight_date, part_number,"
-        "  raw_text, parse_error, source_archive, source_file)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "  raw_text, raw_text_plain, parse_error, source_archive, source_file)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
     if fact_rows:
@@ -474,6 +480,7 @@ def ingest_archives(archive_paths, db_path, progress=None, should_stop=None):
     _probe_writable(db_path)
     con = sqlite3.connect(db_path)
     con.executescript(build_schema())
+    _migrate(con)
     seen = dict(con.execute("SELECT name, size FROM archives"))
     ingested = skipped = failed = 0
     done = 0
@@ -505,6 +512,23 @@ def ingest_archives(archive_paths, db_path, progress=None, should_stop=None):
     return ingested, skipped, failed
 
 
+def _migrate(con):
+    """Bring an existing DB up to the current schema.
+
+    ``CREATE TABLE IF NOT EXISTS`` never adds columns to a table that already
+    exists and never replaces an existing view, so older databases need
+    explicit migration here. Currently adds ``messages.raw_text_plain`` and
+    re-creates ``messages_readable`` to expose it.
+    """
+    cols = {c[1] for c in con.execute("PRAGMA table_info(messages)")}
+    if "raw_text_plain" not in cols:
+        con.execute("ALTER TABLE messages ADD COLUMN raw_text_plain TEXT")
+    # Always rebuild the readable view so it tracks the current column set.
+    con.execute("DROP VIEW IF EXISTS messages_readable")
+    con.executescript(build_schema())
+    con.commit()
+
+
 def _probe_writable(db_path):
     try:
         con = sqlite3.connect(db_path, timeout=5.0)
@@ -522,6 +546,7 @@ def rebuild_archives(archive_paths, db_path, progress=None, should_stop=None):
     _probe_writable(db_path)
     con = sqlite3.connect(db_path)
     con.executescript(build_schema())
+    _migrate(con)
     # Clear every derived table, not just the message table: message ids restart
     # at 1 after the delete (no AUTOINCREMENT), so stale fact/segment rows from a
     # previous run would otherwise collide with the freshly re-ingested rows.
@@ -653,14 +678,15 @@ def cmd_search(args):
 
 def cmd_show(args):
     con = sqlite3.connect(args.db)
+    column = "raw_text_plain" if getattr(args, "plain", False) else "raw_text"
     row = con.execute(
-        "SELECT raw_text FROM messages WHERE id = ?", (args.message_id,)
+        f"SELECT {column} FROM messages WHERE id = ?", (args.message_id,)
     ).fetchone()
     con.close()
     if row is None:
         print(f"no message with id {args.message_id}", file=sys.stderr)
         return 1
-    sys.stdout.write(row[0])
+    sys.stdout.write(row[0] or "")
     return 0
 
 
@@ -736,6 +762,8 @@ def main(argv=None):
 
     p_show = sub.add_parser("show", help="print the full raw text of one message")
     p_show.add_argument("--db", required=True)
+    p_show.add_argument("--plain", action="store_true",
+                        help="print the stored un-redacted plaintext instead of the redacted text")
     p_show.add_argument("message_id", type=int)
 
     p_stats = sub.add_parser("stats", help="aggregate statistics over the index")

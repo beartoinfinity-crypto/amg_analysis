@@ -63,6 +63,7 @@ message_facts(message_id PK REFERENCES messages(id), family NOT NULL,
 message_segments(id PK, message_id NOT NULL REFERENCES messages(id),
                  seq INTEGER NOT NULL, data_json TEXT NOT NULL)
 VIEW messages_readable = messages + message_text (framing bytes stripped)
+  + message_text_plain (framing-stripped un-redacted original)
 ```
 
 Column meanings:
@@ -301,6 +302,16 @@ exceeding MTOW, etc. Returns a list of warning strings (empty = clean).
 PII redaction: PNL/ADL fully redacted (count-only); PTM/PSM/PAL/CAL partial
 (names stripped, assist codes kept). Redaction runs on `raw_text` before
 storage — verified zero leaks on MR/MRS/ticket/passport pattern sweeps.
+
+`raw_text` (and `messages_readable.message_text`) is the redacted copy. The
+verbatim un-redacted original is stored **alongside** in
+`messages.raw_text_plain` (exposed as `messages_readable.message_text_plain`,
+and printable via `show --plain`), per an explicit operator decision to trade
+away PII-at-rest for queryability. Note the trade-off: the plaintext column
+holds passenger names/contact detail in the clear, so access to the DB file
+grants access to that PII. Full-text search (`messages_fts`) indexes only the
+redacted `raw_text`, never the plaintext. The column is NULL on rows ingested
+before the migration until they are re-ingested.
 
 ---
 

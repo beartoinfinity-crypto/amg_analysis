@@ -8,8 +8,8 @@ Tables involved:
 
 | Object | Purpose |
 | --- | --- |
-| `messages` | raw parsed messages (framing bytes preserved in `raw_text`) |
-| `messages_readable` | view = `messages` + `message_text` (framing bytes stripped for display) |
+| `messages` | raw parsed messages (framing bytes preserved in `raw_text`; `raw_text_plain` holds the un-redacted original) |
+| `messages_readable` | view = `messages` + `message_text` (framing bytes stripped for display) + `message_text_plain` (un-redacted) |
 | `message_facts` | one row per extracted message: `family`, `facts_json` (JSON object) |
 | `message_segments` | repeating rows (PTM transfers, FWD hops, LDM destination segments): `seq`, `data_json` (JSON object) |
 | `messages_fts` | FTS5 index over `raw_text`; query via `MATCH` on `rowid` |
@@ -490,7 +490,22 @@ Every query appends `r.message_text` — the stored (framing-stripped) original 
 so you can jump from a fact to the exact source message. Note PNL/ADL text is
 redacted to `[REDACTED]` at storage by policy (see `redact_text` in
 architecture.md); the structured facts below are extracted from the pre-redaction
-text and remain PII-free.
+text and remain PII-free. To see the un-redacted original instead, swap
+`r.message_text` for `r.message_text_plain` (or select both side by side):
+
+```sql
+-- Example: interesting fields + both copies of the text
+SELECT r.received_at, r.flight_number,
+       json_extract(f.facts_json, '$.pxe') AS pxe,
+       r.message_text,        -- redacted copy (PNL/ADL names -> [REDACTED])
+       r.message_text_plain   -- un-redacted original (holds real names)
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+WHERE r.msg_type IN ('PNL', 'ADL');
+```
+
+Rows ingested before the plaintext column was added have NULL
+`message_text_plain` until re-ingested.
 
 ### 12.1 MOVEMENT (MVT, MVA)
 

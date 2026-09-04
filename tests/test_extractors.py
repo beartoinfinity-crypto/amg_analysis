@@ -331,6 +331,42 @@ def test_name_lists_are_fully_redacted_with_counts_only(tmp_path, make_archive):
         assert pii not in text, pii
 
 
+def test_raw_text_plain_stores_unredacted_original(tmp_path, make_archive):
+    body = (
+        "\r\n\x01QU HKGTSXH\r\n"
+        ".HKGUKBA 130825\r\n"
+        "\x02PNL\r\n"
+        "LJ805/13MAY MAN PART1\r\n"
+        "CFG/014F076J429Y\r\n"
+        "AVAIL\r\n"
+        "1SMITH/JOHNMR .R/TKNE XX1 1234567890/1\r\n"
+        "2JONES/FREDMR\r\n"
+        ".R/FBA 1PC\r\n"
+        ".RN/4MR / U2TTZ8\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    stored = con.execute("SELECT raw_text, raw_text_plain FROM messages").fetchone()
+    # Redacted copy keeps its policy: no names leak into raw_text.
+    assert "SMITH" not in stored["raw_text"]
+    assert "[REDACTED]" in stored["raw_text"]
+    # Plain copy preserves the original verbatim.
+    for plain_fragment in ("SMITH/JOHNMR", "JONES/FREDMR", "1234567890", "U2TTZ8"):
+        assert plain_fragment in stored["raw_text_plain"], plain_fragment
+    # The readable view exposes the plain column alongside the redacted one.
+    view_row = con.execute(
+        "SELECT message_text, message_text_plain FROM messages_readable"
+    ).fetchone()
+    assert "SMITH/JOHNMR" in view_row["message_text_plain"]
+    assert "SMITH" not in view_row["message_text"]
+    # Full-text search stays on the redacted text only: a surname query
+    # must not match anything.
+    hits = con.execute(
+        "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'SMITH'"
+    ).fetchone()[0]
+    assert hits == 0
+
+
 def test_pnl_extracts_flight_element_facts(tmp_path, make_archive):
     body = (
         "\r\n\x01QD HKGTSXH\r\n"

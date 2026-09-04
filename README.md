@@ -92,7 +92,12 @@ python -m amg search --db amg_messages.db --type BSM --csv > bsm.csv
 python -m amg show --db amg_messages.db 42
 ```
 
-Prints the stored raw text byte-for-byte.
+Prints the stored raw text byte-for-byte (PNL/ADL name rows appear as
+`[REDACTED]`). Add `--plain` to print the un-redacted original instead:
+
+```console
+python -m amg show --db amg_messages.db 42 --plain
+```
 
 ### 4. Analyse
 
@@ -198,7 +203,10 @@ tables (`message_facts`, `message_segments`) joined by `message_id`.
 
 **Browsing externally.** Open `amg_messages.db` in DB Browser for SQLite. Use
 the `messages_readable` view - identical columns plus `message_text`, which is
-raw text with framing bytes stripped for readable display. Structured facts
+raw text with framing bytes stripped for readable display, and
+`message_text_plain`, the un-redacted original (PII policy applies to
+`message_text` only; the plain column intentionally holds PNL/ADL names - see
+`redact_text` in docs/architecture.md). Structured facts
 are in `message_facts.facts_json`; repeating rows (PTM transfers, FWD hops,
 LDM destination segments) are in `message_segments.data_json`.
 
