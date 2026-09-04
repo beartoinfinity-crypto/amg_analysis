@@ -14,6 +14,7 @@ Tables involved:
 | `message_segments` | repeating rows (PTM transfers, FWD hops, LDM destination segments): `seq`, `data_json` (JSON object) |
 | `messages_fts` | FTS5 index over `raw_text`; query via `MATCH` on `rowid` |
 | `archives` | ingested archive names + sizes (used by dedup logic) |
+| `pnl_burst` | view: multi-part PNL/ADL transmission assembled to burst level — completeness gate (`complete` = final terminator seen), per-(dest,cabin) block totals, burst `pxe`/`px6` |
 
 ---
 
@@ -625,25 +626,48 @@ ORDER BY r.received_at DESC, s.seq;
 ```
 
 Flights split across multiple parts (e.g. KE2012 = PART1..18) are stored as one
-row per part/message, each with its own `pxe`/`px6`. To consolidate to flight
-level, aggregate across parts by the flight identity. Caution: treating `SUM`
-as the flight PX6 assumes parts do not overlap legs — if a leg appears in
-several parts, the sum double-counts it. For a first-pass reconciliation this
-query is still the right shape:
+row per part/message, each with its own `pxe`/`px6`. **Do not SUM per-part
+rows** — corpus evidence shows parts repeat the destination-total blocks as
+reference headers while only the name rows are partitioned, so a SUM massively
+over-counts (KE2012: sum of per-part pxe = 4,849 vs true assembled total 317).
+
+Use the `pnl_burst` view instead. It groups parts into bursts (flight identity
++ ADL revision `ana` + arrival hour), gates on the final terminator
+(`ENDPNL`/`ENDADL` — a burst is `complete = 1` only once it arrives), assembles
+per-(dest,cabin) totals as the most complete declaration seen in any part, and
+re-derives burst-level `pxe`/`px6` from the assembled blocks (same HKG routing
+rules as the extractor):
 
 ```sql
-SELECT r.flight_number, r.flight_airport,
-       json_extract(f.facts_json, '$.dep_month') AS dep_month,
-       COUNT(DISTINCT r.part_number)             AS parts,
-       SUM(json_extract(f.facts_json, '$.pxe'))  AS pxe_total,
-       SUM(json_extract(f.facts_json, '$.px6'))  AS px6_total
-FROM messages_readable r
-JOIN message_facts f ON f.message_id = r.id
-WHERE r.msg_type IN ('PNL', 'ADL')
-  AND json_extract(f.facts_json, '$.no_action') = 0
-GROUP BY r.flight_number, r.flight_airport,
-         json_extract(f.facts_json, '$.dep_month')
-ORDER BY pxe_total DESC;
+-- One row per assembled (dest, cabin) block of each burst
+SELECT * FROM pnl_burst
+WHERE flight_number = 'KE2012' AND complete = 1;
+```
+
+Latest complete burst per flight (ADLs supersede earlier PNL/ADL revisions —
+`last_received_at` picks the winner):
+
+```sql
+SELECT *
+FROM pnl_burst b
+WHERE b.complete = 1
+  AND b.last_received_at = (
+    SELECT MAX(b2.last_received_at)
+    FROM pnl_burst b2
+    WHERE b2.flight_number = b.flight_number
+      AND b2.boarding_airport = b.boarding_airport
+      AND b2.dep_date = b.dep_date
+      AND b2.complete = 1
+  );
+```
+
+Flight-level totals only (no per-block rows):
+
+```sql
+SELECT DISTINCT flight_number, dep_date, ana, part_count, complete,
+       burst_pxe, burst_px6, action
+FROM pnl_burst
+ORDER BY flight_number, last_received_at;
 ```
 
 ### 12.7 FORWARD (FWD)

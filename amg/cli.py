@@ -160,7 +160,7 @@ WHERE r.msg_type = 'LDM';
 
 
 def build_schema():
-    return SCHEMA + _remap_view_sql() + _pnl_view_sql()
+    return SCHEMA + _remap_view_sql() + _pnl_view_sql() + _pnl_burst_view_sql()
 
 
 PNL_VIEW_COLUMNS = [
@@ -209,6 +209,115 @@ JOIN message_facts f ON f.message_id = r.id
 LEFT JOIN message_segments s ON s.message_id = r.id
 WHERE r.msg_type IN ('PNL', 'ADL')
 GROUP BY r.id;
+"""
+
+
+def _pnl_burst_view_sql():
+    """Burst-aware assembly of multi-part PNL/ADL transmissions (RP 1708).
+
+    A flight's PNL/ADL is often split into PART1..N: every part repeats the
+    destination-total blocks as reference headers while the name rows are
+    partitioned, and only the last part carries the final terminator
+    (ENDPNL/ENDADL). Per-message rows therefore cannot be summed. This view
+    groups parts into bursts (flight identity + revision ANA + arrival hour),
+    gates on the final-terminator fact, assembles per-(dest,cabin) totals as
+    the most complete declaration seen in any part, and re-derives the
+    burst-level PXE/PX6 from the assembled blocks using the HKG routing rules
+    (same semantics as extractors._aggregate_pnl).
+    """
+    return """
+DROP VIEW IF EXISTS pnl_burst;
+CREATE VIEW pnl_burst AS
+WITH parts AS (
+  SELECT r.id AS message_id, r.received_at, r.msg_type, r.flight_number,
+         json_extract(f.facts_json, '$.boarding_airport') AS boarding_airport,
+         json_extract(f.facts_json, '$.dep_day') AS dep_day,
+         json_extract(f.facts_json, '$.dep_month') AS dep_month,
+         COALESCE(json_extract(f.facts_json, '$.ana'), '') AS ana,
+         CAST(json_extract(f.facts_json, '$.final') AS INTEGER) AS final,
+         json_extract(s.data_json, '$.dest') AS dest,
+         json_extract(s.data_json, '$.cabin_class') AS cabin_class,
+         json_extract(s.data_json, '$.declared_total') AS declared_total,
+         json_extract(s.data_json, '$.pad_total') AS pad_total,
+         json_extract(s.data_json, '$.actual_parsed_pax') AS actual_parsed_pax,
+         r.flight_number || '/' ||
+         COALESCE(json_extract(f.facts_json, '$.boarding_airport'), '') || '/' ||
+         COALESCE(json_extract(f.facts_json, '$.dep_day'), '') ||
+         COALESCE(json_extract(f.facts_json, '$.dep_month'), '') || '/' ||
+         COALESCE(json_extract(f.facts_json, '$.ana'), '') || '/' ||
+         strftime('%Y%m%d%H', r.received_at) AS burst_key,
+         -- sortable arrival order: message receipt time, then position in it
+         r.received_at || printf('/%08d/%04d', r.id, s.seq) AS arrival_key
+  FROM messages_readable r
+  JOIN message_facts f ON f.message_id = r.id
+  JOIN message_segments s ON s.message_id = r.id
+  WHERE r.msg_type IN ('PNL', 'ADL')
+),
+blocks AS (
+  -- destination blocks repeat across parts as reference headers, so the
+  -- burst's declaration is the most complete (maximum) total seen in any
+  -- part; name rows are partitioned, so parsed counts sum. first_seen keeps
+  -- the arrival order in which each block appeared.
+  SELECT burst_key, dest, cabin_class,
+         MAX(declared_total) AS declared_total,
+         MAX(pad_total) AS pad_total,
+         SUM(actual_parsed_pax) AS actual_parsed_pax,
+         MIN(arrival_key) AS first_seen
+  FROM parts
+  GROUP BY burst_key, dest, cabin_class
+),
+hkg AS (
+  -- arrival order at which HKG (if any) first appears in the burst
+  SELECT burst_key, MIN(first_seen) AS hkg_seen
+  FROM blocks WHERE dest = 'HKG'
+  GROUP BY burst_key
+),
+meta AS (
+  SELECT burst_key,
+         MAX(flight_number) AS flight_number,
+         MAX(msg_type) AS msg_type,
+         MAX(boarding_airport) AS boarding_airport,
+         MAX(dep_day) AS dep_day,
+         MAX(dep_month) AS dep_month,
+         NULLIF(MAX(ana), '') AS ana,
+         MAX(received_at) AS last_received_at,
+         COUNT(DISTINCT message_id) AS part_count,
+         MAX(final) AS complete
+  FROM parts
+  GROUP BY burst_key
+),
+totals AS (
+  -- assembled burst-level PXE, and PX6 (downline of HKG) when the burst
+  -- boards upstream of HKG; departure-only bursts get no PX6, downstream
+  -- (no HKG leg) bursts have neither.
+  SELECT b.burst_key,
+         SUM(b.declared_total) AS burst_pxe,
+         CASE WHEN m.boarding_airport = 'HKG' THEN NULL
+              ELSE SUM(CASE WHEN h.hkg_seen IS NOT NULL
+                            AND b.first_seen > h.hkg_seen
+                            THEN b.declared_total ELSE 0 END)
+         END AS burst_px6
+  FROM blocks b
+  JOIN meta m ON m.burst_key = b.burst_key
+  LEFT JOIN hkg h ON h.burst_key = b.burst_key
+  GROUP BY b.burst_key
+)
+SELECT m.burst_key, m.flight_number, m.msg_type, m.boarding_airport,
+       m.dep_day || ' ' || m.dep_month AS dep_date,
+       m.ana, m.last_received_at, m.part_count, m.complete,
+       t.burst_pxe, t.burst_px6,
+       CASE WHEN m.boarding_airport = 'HKG' THEN 'departure'
+            WHEN h.hkg_seen IS NOT NULL THEN 'arrival+departure'
+            ELSE 'no_action' END AS action,
+       b.dest, b.cabin_class,
+       b.declared_total AS block_declared_total,
+       b.pad_total AS block_pad_total,
+       b.actual_parsed_pax AS block_actual_parsed_pax
+FROM blocks b
+JOIN meta m ON m.burst_key = b.burst_key
+JOIN totals t ON t.burst_key = b.burst_key
+LEFT JOIN hkg h ON h.burst_key = b.burst_key
+ORDER BY b.burst_key, b.first_seen;
 """
 
 FLIGHT_LINE = re.compile(

@@ -87,6 +87,10 @@ PNL_DEST_RE = re.compile(r"^-([A-Z]{3})([0-9]{1,3})([A-Z])(?:-PAD([0-9]{1,3}))?$
 PNL_ANA_RE = re.compile(r"^ANA/([A-Z0-9]+)$", re.ASCII)
 PNL_NAME_COUNT_RE = re.compile(r"^([0-9]+)")
 SSR_SUMMARY_RE = re.compile(r"^(?:SSR|\.R/)\s*([A-Z]{2,4})(?=\s|/|$)", re.ASCII)
+# Transmission terminator: ENDPARTn closes one part, ENDPNL/ENDADL close the
+# whole multi-part transmission. A burst of parts is only complete once the
+# final terminator arrives.
+PNL_TERMINATOR_RE = re.compile(r"^(ENDPART[0-9]*|ENDPNL|ENDADL)$", re.ASCII)
 
 FAMILIES = {
     "MVT": "MOVEMENT", "MVA": "MOVEMENT",
@@ -714,6 +718,15 @@ def extract_name_list(raw_text):
             ssr_codes[code] = ssr_codes.get(code, 0) + 1
     if ssr_codes:
         facts["ssrs"] = ssr_codes
+
+    terminator = next(
+        (l.strip() for l in reversed(lines) if l.strip() and
+         PNL_TERMINATOR_RE.match(l.strip())),
+        None,
+    )
+    if terminator:
+        facts["terminator"] = terminator
+        facts["final"] = terminator in ("ENDPNL", "ENDADL")
 
     boarding = facts.get("boarding_airport")
     if boarding is not None:

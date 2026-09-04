@@ -419,6 +419,174 @@ def test_pnl_extracts_destination_segments_and_class_totals(tmp_path, make_archi
     assert segs[3]["cabin_class"] == "Y" and segs[3]["declared_total"] == 213
 
 
+def test_pnl_captures_transmission_terminator(tmp_path, make_archive):
+    # Parts terminate with ENDPARTn; the last part of the whole transmission
+    # carries the final terminator (ENDPNL/ENDADL) that completes the burst.
+    def body(part, terminator):
+        return (
+            "\r\n\x01QD HKGTSXH\r\n"
+            ".DXBRCEK 111840\r\n"
+            "\x02ADL\r\n"
+            f"EK0380/12AUG DXB PART{part}\r\n"
+            "ANA/709779\r\n"
+            "-HKG213Y\r\n"
+            f"1SMITH/JOHNMR\r\n"
+            f"{terminator}\r\n"
+            "\x03\r\n"
+        )
+
+    con = ingest_text(tmp_path, make_archive, body(1, "ENDPART1"))
+    import json
+    facts = json.loads(con.execute(
+        "SELECT facts_json FROM message_facts").fetchone()["facts_json"])
+    assert facts["terminator"] == "ENDPART1"
+    assert facts["final"] is False
+
+    con2 = ingest_text(tmp_path, make_archive, body(3, "ENDADL"),
+                       archive_name="PROCESSED_20260610_0026.tar.Z")
+    facts2 = json.loads(con2.execute(
+        "SELECT facts_json FROM message_facts ORDER BY message_id DESC"
+    ).fetchone()["facts_json"])
+    assert facts2["terminator"] == "ENDADL"
+    assert facts2["final"] is True
+
+
+def test_pnl_burst_view_assembles_multi_part_transmission(tmp_path, make_archive):
+    # KE2012-style burst: blocks repeat across parts (part 2 carries the most
+    # complete declaration), name rows are partitioned, and only the last part
+    # carries the final terminator ENDADL.
+    def part_body(part, blocks, terminator, names):
+        lines = [
+            "\r\n\x01QD HKGTSXH\r\n",
+            ".MUCPNKE 221053\r\n",
+            "\x02ADL\r\n",
+            f"KE2012/23AUG HKG PART{part}\r\n",
+            "ANA/787498\r\n",
+        ]
+        lines += [f"-{b}\r\n" for b in blocks]
+        lines += [f"{n}SMITH/JOHN{n}MR\r\n" for n in names]
+        lines += [f"{terminator}\r\n", "\x03\r\n"]
+        return "".join(lines)
+
+    archive_dir = tmp_path / "AMG_msg"
+    archive_dir.mkdir(exist_ok=True)
+    make_archive(
+        archive_dir / "PROCESSED_20260822_1853.tar.Z",
+        {
+            "HKG/260822185300001.rcv": part_body(1, ["ICN036C"], "ENDPART1", ["1", "2"]),
+            "HKG/260822185300002.rcv": part_body(
+                2, ["ICN036C", "ICN281Y"], "ENDPART2", ["3"]),
+            "HKG/260822185300003.rcv": part_body(3, ["ICN281Y"], "ENDADL", ["4", "5"]),
+        },
+    )
+    db = tmp_path / "index.db"
+    assert main(["ingest", str(archive_dir), "--db", str(db)]) == 0
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+
+    rows = con.execute(
+        "SELECT * FROM pnl_burst ORDER BY cabin_class"
+    ).fetchall()
+    # two assembled blocks: ICN/C = 36 (max seen), ICN/Y = 281 (max seen)
+    assert len(rows) == 2
+    by_class = {r["cabin_class"]: r for r in rows}
+    assert by_class["C"]["block_declared_total"] == 36
+    assert by_class["Y"]["block_declared_total"] == 281
+    # name multipliers partition across parts and ride the current block:
+    # part1 (C current) contributes 1+2 to C, part3 (Y current) contributes
+    # 4+5 to Y, and part2's name (3) rides Y as its last block.
+    assert by_class["C"]["block_actual_parsed_pax"] == 3
+    assert by_class["Y"]["block_actual_parsed_pax"] == 12
+    # burst-level assembled totals and completeness gate
+    for r in rows:
+        assert r["part_count"] == 3
+        assert r["complete"] == 1
+        assert r["burst_pxe"] == 36 + 281
+        assert r["ana"] == "787498"
+        assert r["boarding_airport"] == "HKG"
+    # boarding at HKG: departure-only context -> px6 stays NULL
+    assert by_class["C"]["burst_px6"] is None
+    assert by_class["Y"]["burst_px6"] is None
+
+
+def test_pnl_burst_view_marks_incomplete_bursts(tmp_path, make_archive):
+    # Parts arrived but the final terminator never did: the burst must be
+    # reported as incomplete (complete = 0).
+    def part_body(part, blocks, terminator):
+        lines = [
+            "\r\n\x01QD HKGTSXH\r\n",
+            ".MUCPNKE 221053\r\n",
+            "\x02PNL\r\n",
+            f"KE2012/23AUG HKG PART{part}\r\n",
+        ]
+        lines += [f"-{b}\r\n" for b in blocks]
+        lines += [f"{terminator}\r\n", "\x03\r\n"]
+        return "".join(lines)
+
+    archive_dir = tmp_path / "AMG_msg"
+    archive_dir.mkdir(exist_ok=True)
+    make_archive(
+        archive_dir / "PROCESSED_20260822_1854.tar.Z",
+        {
+            "HKG/260822185400001.rcv": part_body(1, ["ICN281Y"], "ENDPART1"),
+            "HKG/260822185400002.rcv": part_body(2, ["ICN281Y"], "ENDPART2"),
+        },
+    )
+    db = tmp_path / "index.db"
+    assert main(["ingest", str(archive_dir), "--db", str(db)]) == 0
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    row = con.execute(
+        "SELECT * FROM pnl_burst"
+    ).fetchone()
+    assert row["part_count"] == 2
+    assert row["complete"] == 0
+    assert row["burst_pxe"] == 281
+
+
+def test_pnl_burst_view_computes_px6_for_upstream_boarding(tmp_path, make_archive):
+    # Upstream station ICN sends a 2-part burst for ICN -> HKG -> SYD -> AKL:
+    # arrival + departure at HKG; assembled PX6 counts everything downline of
+    # HKG (SYD + AKL), not the sum of per-part rows.
+    def part_body(part, blocks, terminator):
+        lines = [
+            "\r\n\x01QD HKGTSXH\r\n",
+            ".ICNPNKE 221053\r\n",
+            "\x02PNL\r\n",
+            f"KE2011/23AUG ICN PART{part}\r\n",
+        ]
+        lines += [f"-{b}\r\n" for b in blocks]
+        lines += [f"{terminator}\r\n", "\x03\r\n"]
+        return "".join(lines)
+
+    archive_dir = tmp_path / "AMG_msg"
+    archive_dir.mkdir(exist_ok=True)
+    make_archive(
+        archive_dir / "PROCESSED_20260822_1855.tar.Z",
+        {
+            "ICN/260822185500001.rcv": part_body(
+                1, ["HKG010Y", "SYD120Y"], "ENDPART1"),
+            "ICN/260822185500002.rcv": part_body(
+                2, ["HKG010Y", "SYD120Y", "AKL030Y"], "ENDPNL"),
+        },
+    )
+    db = tmp_path / "index.db"
+    assert main(["ingest", str(archive_dir), "--db", str(db)]) == 0
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    rows = con.execute(
+        "SELECT * FROM pnl_burst ORDER BY block_declared_total DESC"
+    ).fetchall()
+    # assembled: HKG=10, SYD=120, AKL=30 -> pxe=160, px6=150 (SYD+AKL)
+    for r in rows:
+        assert r["burst_pxe"] == 160
+        assert r["burst_px6"] == 150
+        assert r["action"] == "arrival+departure"
+        assert r["complete"] == 1
+    dests = {r["dest"]: r["block_declared_total"] for r in rows}
+    assert dests == {"HKG": 10, "SYD": 120, "AKL": 30}
+
+
 def test_pnl_aggregates_pxe_px6_for_upstream_boarding(tmp_path, make_archive):
     # PNL sent from SYD with legs SIN -> HKG -> SFO -> JFK: arrival at HKG
     # carries everyone downline; PX6 is only the HKG further-stops (SFO, JFK).
