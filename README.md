@@ -20,7 +20,7 @@ pip install -e .
   never modifies them.
 - **Message** - one raw Type B message per inner file (`.rcv` = processed,
   `.COR` = corrupted), named with its receipt timestamp under a station folder
-  (e.g. `HKG/260607002540778.rcv`).
+  (e.g. `KIX/260607002540778.rcv`).
 - **Index** - one SQLite database (`amg_messages.db` by default) holding all
   parsed messages plus full-text search.
 
@@ -71,7 +71,6 @@ Filters combine freely; results are newest-first.
 ```console
 python -m amg search --db amg_messages.db --type MVT --flight CI5825
 python -m amg search --db amg_messages.db --from 2026-06-07 --to 2026-06-07
-python -m amg search --db amg_messages.db --origin HKGODCI --status corrupted
 python -m amg search --db amg_messages.db --q "B18778"
 python -m amg search --db amg_messages.db --type BSM --csv > bsm.csv
 ```
@@ -80,7 +79,7 @@ python -m amg search --db amg_messages.db --type BSM --csv > bsm.csv
 | --- | --- |
 | `--type` | message keyword: MVT, LDM, ADL, PNL, ... (unrecognised bodies are typed OTHER) |
 | `--flight` | flight number parsed from the info line, e.g. `CI5825` |
-| `--origin` / `--dest` | Type B origin/destination address, e.g. `HKGTSXH` |
+| `--origin` / `--dest` | Type B origin/destination address, e.g. `KIXTSXH` |
 | `--status` | `processed` or `corrupted` |
 | `--from` / `--to` | received-at window; dates (`2026-06-07`) or timestamps |
 | `--q` | full-text query over raw message bodies |
@@ -154,7 +153,7 @@ in different shapes per message family:
 | new LDM | `FLIGHT/DDMMM[YY].REG...` | flight_number, aircraft_reg, flight_date |
 | ASM | `FLIGHT/DDMMMYY ...` | flight_number, flight_date |
 | PNL, ADL, PAL, CAL, PSM | `FLIGHT/DDMMM AIRPORT [PARTn]` | flight_number, flight_date, flight_airport, part_number |
-| PTM | same, with from-to pair | flight_airport holds e.g. `SYXHKG` |
+| PTM | same, with from-to pair | flight_airport holds e.g. `SYXKIX` |
 
 Flight numbers are restricted to 1-4 digits (`\d{1,4}`) per AHM 780 spec.
 
