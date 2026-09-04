@@ -609,6 +609,31 @@ def test_pnl_burst_view_downstream_boarding_has_no_px6(tmp_path, make_archive):
     assert row["complete"] == 1
 
 
+def test_pnl_burst_view_hkg_multicabin_blocks_are_not_downline(tmp_path, make_archive):
+    # TG600-style case: BKK -> HKG where HKG is the TERMINUS, declared in two
+    # cabins (-HKG028C before -HKG303Y). Nobody continues past HKG, so the
+    # later HKG/Y block must NOT be counted as "downline of HKG" - the
+    # destination-level comparison keeps px6 = 0.
+    lines = [
+        "\r\n\x01QD HKGTSXH\r\n",
+        ".MUCPNTG 221614\r\n",
+        "\x02ADL\r\n",
+        "TG600/23AUG BKK PART1\r\n",
+        "ANA/677779\r\n",
+        "-HKG028C\r\n",
+        "-HKG303Y\r\n",
+        "ENDADL\r\n",
+        "\x03\r\n",
+    ]
+    con = ingest_text(tmp_path, make_archive, "".join(lines))
+    rows = con.execute("SELECT * FROM pnl_burst").fetchall()
+    assert len(rows) == 2
+    for r in rows:
+        assert r["burst_pxe"] == 331
+        assert r["burst_px6"] == 0
+        assert r["action"] == "arrival+departure"
+
+
 def test_pnl_aggregates_pxe_px6_for_upstream_boarding(tmp_path, make_archive):
     # PNL sent from SYD with legs SIN -> HKG -> SFO -> JFK: arrival at HKG
     # carries everyone downline; PX6 is only the HKG further-stops (SFO, JFK).

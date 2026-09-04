@@ -272,6 +272,14 @@ hkg AS (
   FROM blocks WHERE dest = 'HKG'
   GROUP BY burst_key
 ),
+destpos AS (
+  -- per-destination first appearance: HKG's own later cabin blocks must not
+  -- count as "downline of HKG", so the downline test compares destinations,
+  -- not (dest, cabin) blocks.
+  SELECT burst_key, dest, MIN(first_seen) AS dest_seen
+  FROM blocks
+  GROUP BY burst_key, dest
+),
 meta AS (
   SELECT burst_key,
          MAX(flight_number) AS flight_number,
@@ -289,17 +297,20 @@ meta AS (
 totals AS (
   -- assembled burst-level PXE, and PX6 (downline of HKG) when the burst
   -- boards upstream of HKG; departure-only bursts get no PX6, downstream
-  -- (no HKG leg) bursts have neither - NULL, matching _aggregate_pnl.
+  -- (no HKG leg) bursts have neither - NULL, matching _aggregate_pnl. A
+  -- block counts as downline only when its DESTINATION first appears
+  -- after HKG's first appearance (multi-cabin HKG blocks are not downline).
   SELECT b.burst_key,
          SUM(b.declared_total) AS burst_pxe,
          CASE WHEN m.boarding_airport = 'HKG' THEN NULL
               WHEN h.hkg_seen IS NULL THEN NULL
-              ELSE SUM(CASE WHEN b.first_seen > h.hkg_seen
+              ELSE SUM(CASE WHEN dp.dest_seen > h.hkg_seen
                             THEN b.declared_total ELSE 0 END)
          END AS burst_px6
   FROM blocks b
   JOIN meta m ON m.burst_key = b.burst_key
   LEFT JOIN hkg h ON h.burst_key = b.burst_key
+  JOIN destpos dp ON dp.burst_key = b.burst_key AND dp.dest = b.dest
   GROUP BY b.burst_key
 )
 SELECT m.burst_key, m.flight_number, m.msg_type, m.boarding_airport,
