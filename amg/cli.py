@@ -98,6 +98,30 @@ CREATE TABLE IF NOT EXISTS message_segments (
   seq INTEGER NOT NULL,
   data_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS pnl_bursts (
+  burst_key TEXT NOT NULL,
+  flight_number TEXT,
+  msg_type TEXT,
+  boarding_airport TEXT,
+  dep_date TEXT,
+  ana TEXT,
+  last_received_at TEXT,
+  part_count INTEGER,
+  complete INTEGER,
+  burst_pxe INTEGER,
+  burst_px6 INTEGER,
+  action TEXT,
+  dest TEXT,
+  cabin_class TEXT,
+  block_declared_total INTEGER,
+  block_pad_total INTEGER,
+  block_actual_parsed_pax INTEGER,
+  PRIMARY KEY (burst_key, dest, cabin_class)
+);
+CREATE INDEX IF NOT EXISTS idx_messages_type_flight
+  ON messages (msg_type, flight_number);
+CREATE INDEX IF NOT EXISTS idx_pnl_bursts_flight
+  ON pnl_bursts (flight_number, complete);
 CREATE VIEW IF NOT EXISTS messages_readable AS
 SELECT id, received_at, station, status, msg_type, priority, destination, origin,
        flight_number, aircraft_reg, flight_airport, flight_date, part_number,
@@ -212,22 +236,24 @@ GROUP BY r.id;
 """
 
 
-def _pnl_burst_view_sql():
-    """Burst-aware assembly of multi-part PNL/ADL transmissions (RP 1708).
+def _pnl_burst_select_sql(extra_where=""):
+    """Burst assembly SELECT for multi-part PNL/ADL transmissions (RP 1708).
 
     A flight's PNL/ADL is often split into PART1..N: every part repeats the
     destination-total blocks as reference headers while the name rows are
     partitioned, and only the last part carries the final terminator
-    (ENDPNL/ENDADL). Per-message rows therefore cannot be summed. This view
+    (ENDPNL/ENDADL). Per-message rows therefore cannot be summed. This SELECT
     groups parts into bursts (flight identity + revision ANA + arrival hour),
     gates on the final-terminator fact, assembles per-(dest,cabin) totals as
     the most complete declaration seen in any part, and re-derives the
     burst-level PXE/PX6 from the assembled blocks using the HKG routing rules
     (same semantics as extractors._aggregate_pnl).
+
+    ``extra_where`` is injected into the parts CTE (e.g. an AND flight_number
+    IN (...) filter) so cache refreshes can prune the scan to touched
+    flights.
     """
-    return """
-DROP VIEW IF EXISTS pnl_burst;
-CREATE VIEW pnl_burst AS
+    return f"""
 WITH parts AS (
   SELECT r.id AS message_id, r.received_at, r.msg_type, r.flight_number,
          json_extract(f.facts_json, '$.boarding_airport') AS boarding_airport,
@@ -251,7 +277,7 @@ WITH parts AS (
   FROM messages_readable r
   JOIN message_facts f ON f.message_id = r.id
   JOIN message_segments s ON s.message_id = r.id
-  WHERE r.msg_type IN ('PNL', 'ADL')
+  WHERE r.msg_type IN ('PNL', 'ADL'){extra_where}
 ),
 blocks AS (
   -- destination blocks repeat across parts as reference headers, so the
@@ -329,6 +355,15 @@ JOIN meta m ON m.burst_key = b.burst_key
 JOIN totals t ON t.burst_key = b.burst_key
 LEFT JOIN hkg h ON h.burst_key = b.burst_key
 ORDER BY b.burst_key, b.first_seen;
+"""
+
+
+def _pnl_burst_view_sql():
+    """Burst view over the assembly SELECT (computed on demand, slow on the
+    full corpus - prefer the pnl_bursts cache table for repeated queries)."""
+    return f"""
+DROP VIEW IF EXISTS pnl_burst;
+CREATE VIEW pnl_burst AS {_pnl_burst_select_sql()};
 """
 
 FLIGHT_LINE = re.compile(
@@ -594,6 +629,39 @@ def ingest_archive(archive_path, con):
         "INSERT OR REPLACE INTO archives (name, size, ingested_at) VALUES (?, ?, ?)",
         (archive_path.name, archive_path.stat().st_size, datetime.now(UTC).isoformat()),
     )
+    # Flights whose PNL/ADL this archive contributed, so the caller can
+    # refresh just those bursts in the pnl_bursts cache.
+    return sorted({row[0] for row in con.execute(
+        "SELECT DISTINCT flight_number FROM messages WHERE source_archive = ?"
+        " AND msg_type IN ('PNL', 'ADL') AND flight_number IS NOT NULL",
+        (archive_path.name,),
+    )})
+
+
+def refresh_burst_cache(con, flights=None):
+    """Rebuild pnl_bursts cache rows.
+
+    With ``flights`` (a list of flight numbers), only those flights are
+    re-assembled - their burst rows are deleted and recomputed - so a daily
+    incremental ingest refreshes just what it touched. Without ``flights``,
+    the whole cache is rebuilt. Empty cache + no flights still does a full
+    rebuild, so the first ingest backfills automatically.
+    """
+    con.executescript(build_schema())
+    if flights:
+        qmarks = ",".join("?" * len(flights))
+        con.execute(f"DELETE FROM pnl_bursts WHERE flight_number IN ({qmarks})",
+                    flights)
+        con.execute(
+            "INSERT INTO pnl_bursts " + _pnl_burst_select_sql(
+                f" AND r.flight_number IN ({qmarks})"
+            ),
+            flights,
+        )
+    else:
+        con.execute("DELETE FROM pnl_bursts")
+        con.execute("INSERT INTO pnl_bursts " + _pnl_burst_select_sql())
+    con.commit()
 
 
 def ingest_archives(archive_paths, db_path, progress=None, should_stop=None):
@@ -605,6 +673,7 @@ def ingest_archives(archive_paths, db_path, progress=None, should_stop=None):
     ingested = skipped = failed = 0
     done = 0
     total = len(archive_paths)
+    touched_flights = set()
     for archive_path in archive_paths:
         if should_stop and should_stop():
             break
@@ -612,7 +681,7 @@ def ingest_archives(archive_paths, db_path, progress=None, should_stop=None):
             skipped += 1
         else:
             try:
-                ingest_archive(archive_path, con)
+                touched_flights.update(ingest_archive(archive_path, con))
                 con.commit()
                 ingested += 1
             except Exception as error:
@@ -628,6 +697,11 @@ def ingest_archives(archive_paths, db_path, progress=None, should_stop=None):
     if ingested or fts_stale:
         con.execute("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')")
         con.commit()
+    cache_rows = con.execute("SELECT COUNT(*) FROM pnl_bursts").fetchone()[0]
+    if ingested and (not touched_flights or not cache_rows):
+        refresh_burst_cache(con)
+    elif touched_flights:
+        refresh_burst_cache(con, sorted(touched_flights))
     con.close()
     return ingested, skipped, failed
 
@@ -672,6 +746,7 @@ def rebuild_archives(archive_paths, db_path, progress=None, should_stop=None):
     # previous run would otherwise collide with the freshly re-ingested rows.
     con.execute("DELETE FROM message_segments")
     con.execute("DELETE FROM message_facts")
+    con.execute("DELETE FROM pnl_bursts")
     con.execute("DELETE FROM messages")
     con.execute("DELETE FROM archives")
     con.commit()

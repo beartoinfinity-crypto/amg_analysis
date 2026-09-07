@@ -634,6 +634,81 @@ def test_pnl_burst_view_hkg_multicabin_blocks_are_not_downline(tmp_path, make_ar
         assert r["action"] == "arrival+departure"
 
 
+def test_pnl_bursts_cache_backfills_on_first_ingest(tmp_path, make_archive):
+    # First ingest with an empty cache: the pnl_bursts cache backfills fully,
+    # and querying it is instant (no on-demand view computation).
+    lines = [
+        "\r\n\x01QD HKGTSXH\r\n",
+        ".ICNPNKE 221053\r\n",
+        "\x02PNL\r\n",
+        "KE2011/23AUG ICN PART1\r\n",
+        "-HKG010Y\r\n",
+        "-SYD120Y\r\n",
+        "-AKL030Y\r\n",
+        "ENDPNL\r\n",
+        "\x03\r\n",
+    ]
+    con = ingest_text(tmp_path, make_archive, "".join(lines))
+    cached = con.execute(
+        "SELECT * FROM pnl_bursts ORDER BY block_declared_total DESC"
+    ).fetchall()
+    assert len(cached) == 3
+    assert all(r["burst_pxe"] == 160 for r in cached)
+    assert all(r["burst_px6"] == 150 for r in cached)
+    assert all(r["complete"] == 1 for r in cached)
+    # cache matches the on-demand view
+    via_view = con.execute(
+        "SELECT burst_key, dest, cabin_class, burst_pxe, burst_px6 FROM pnl_burst"
+        " ORDER BY dest"
+    ).fetchall()
+    via_cache = con.execute(
+        "SELECT burst_key, dest, cabin_class, burst_pxe, burst_px6 FROM pnl_bursts"
+        " ORDER BY dest"
+    ).fetchall()
+    assert [tuple(r) for r in via_view] == [tuple(r) for r in via_cache]
+
+
+def test_pnl_bursts_cache_refreshes_touched_flights_incrementally(tmp_path, make_archive):
+    # Ingest flight A; then ingest flight B in a new archive: only B's bursts
+    # are recomputed, A's cached rows survive untouched.
+    def pnl_body(flight, blocks):
+        lines = [
+            "\r\n\x01QD HKGTSXH\r\n",
+            f".ICNPNKE 221053\r\n",
+            "\x02PNL\r\n",
+            f"{flight}/23AUG ICN PART1\r\n",
+        ]
+        lines += [f"-{b}\r\n" for b in blocks]
+        lines += ["ENDPNL\r\n", "\x03\r\n"]
+        return "".join(lines)
+
+    archive_dir = tmp_path / "AMG_msg"
+    archive_dir.mkdir(exist_ok=True)
+    make_archive(archive_dir / "PROCESSED_20260822_1901.tar.Z",
+                 {"ICN/260822190100001.rcv": pnl_body("KE2011", ["HKG010Y", "SYD120Y"])})
+    db = tmp_path / "index.db"
+    assert main(["ingest", str(archive_dir), "--db", str(db)]) == 0
+
+    make_archive(archive_dir / "PROCESSED_20260822_1902.tar.Z",
+                 {"ICN/260822190200001.rcv": pnl_body("OZ8811", ["HKG005Y", "BKK050Y"])})
+    assert main(["ingest", str(archive_dir), "--db", str(db)]) == 0
+
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    flights = sorted(r["flight_number"] for r in con.execute(
+        "SELECT DISTINCT flight_number FROM pnl_bursts"))
+    assert flights == ["KE2011", "OZ8811"]
+
+    ke = con.execute(
+        "SELECT * FROM pnl_bursts WHERE flight_number='KE2011'"
+    ).fetchall()
+    assert all(r["burst_pxe"] == 130 and r["burst_px6"] == 120 for r in ke)
+    oz = con.execute(
+        "SELECT * FROM pnl_bursts WHERE flight_number='OZ8811'"
+    ).fetchall()
+    assert all(r["burst_pxe"] == 55 and r["burst_px6"] == 50 for r in oz)
+
+
 def test_pnl_aggregates_pxe_px6_for_upstream_boarding(tmp_path, make_archive):
     # PNL sent from SYD with legs SIN -> HKG -> SFO -> JFK: arrival at HKG
     # carries everyone downline; PX6 is only the HKG further-stops (SFO, JFK).

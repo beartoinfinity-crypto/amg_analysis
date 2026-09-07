@@ -14,7 +14,8 @@ Tables involved:
 | `message_segments` | repeating rows (PTM transfers, FWD hops, LDM destination segments): `seq`, `data_json` (JSON object) |
 | `messages_fts` | FTS5 index over `raw_text`; query via `MATCH` on `rowid` |
 | `archives` | ingested archive names + sizes (used by dedup logic) |
-| `pnl_burst` | view: multi-part PNL/ADL transmission assembled to burst level — completeness gate (`complete` = final terminator seen), per-(dest,cabin) block totals, burst `pxe`/`px6` |
+| `pnl_burst` | view: multi-part PNL/ADL transmission assembled to burst level — completeness gate (`complete` = final terminator seen), per-(dest,cabin) block totals, burst `pxe`/`px6` (computed on demand; slow on the full corpus) |
+| `pnl_bursts` | cache table of the same burst assembly, refreshed automatically at the end of every ingest (incrementally for touched flights) — query this for fast repeated PXE/PX6 lookups |
 
 ---
 
@@ -631,16 +632,22 @@ rows** — corpus evidence shows parts repeat the destination-total blocks as
 reference headers while only the name rows are partitioned, so a SUM massively
 over-counts (KE2012: sum of per-part pxe = 4,849 vs true assembled total 317).
 
-Use the `pnl_burst` view instead. It groups parts into bursts (flight identity
+Use the burst assembly instead. It groups parts into bursts (flight identity
 + ADL revision `ana` + arrival hour), gates on the final terminator
 (`ENDPNL`/`ENDADL` — a burst is `complete = 1` only once it arrives), assembles
 per-(dest,cabin) totals as the most complete declaration seen in any part, and
 re-derives burst-level `pxe`/`px6` from the assembled blocks (same HKG routing
-rules as the extractor):
+rules as the extractor).
+
+**Query the `pnl_bursts` cache table** (identical columns, refreshed
+automatically at the end of every ingest — incrementally for just the flights
+the ingest touched): it answers instantly. The `pnl_burst` view computes the
+same assembly on demand and takes ~a minute over the full corpus — fine for a
+one-off, wrong for repeated lookups.
 
 ```sql
 -- One row per assembled (dest, cabin) block of each burst
-SELECT * FROM pnl_burst
+SELECT * FROM pnl_bursts
 WHERE flight_number = 'KE2012' AND complete = 1;
 ```
 
@@ -649,11 +656,11 @@ Latest complete burst per flight (ADLs supersede earlier PNL/ADL revisions —
 
 ```sql
 SELECT *
-FROM pnl_burst b
+FROM pnl_bursts b
 WHERE b.complete = 1
   AND b.last_received_at = (
     SELECT MAX(b2.last_received_at)
-    FROM pnl_burst b2
+    FROM pnl_bursts b2
     WHERE b2.flight_number = b.flight_number
       AND b2.boarding_airport = b.boarding_airport
       AND b2.dep_date = b.dep_date
@@ -666,7 +673,7 @@ Flight-level totals only (no per-block rows):
 ```sql
 SELECT DISTINCT flight_number, dep_date, ana, part_count, complete,
        burst_pxe, burst_px6, action
-FROM pnl_burst
+FROM pnl_bursts
 ORDER BY flight_number, last_received_at;
 ```
 
