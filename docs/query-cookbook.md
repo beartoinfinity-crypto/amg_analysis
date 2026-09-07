@@ -671,11 +671,56 @@ WHERE b.complete = 1
 Flight-level totals only (no per-block rows):
 
 ```sql
-SELECT DISTINCT flight_number, dep_date, ana, part_count, complete,
-       burst_pxe, burst_px6, action
+SELECT DISTINCT flight_number, dep_date, ana, message_count, distinct_parts,
+       max_part, complete, burst_pxe, burst_px6, action
 FROM pnl_bursts
 ORDER BY flight_number, last_received_at;
 ```
+
+**Multi-part vs re-sends.** `message_count` counts all messages in the
+transmission group; `distinct_parts`/`max_part` come from the PART numbers in
+the flight elements. A true multi-part PNL (e.g. TK0071 PART1..52) shows
+`distinct_parts > 1`; a cluster of re-sent single-part PNLs (e.g. CX841: nine
+`PART1` messages within the hour, some partial) shows
+`message_count > 1 AND distinct_parts = 1`. The burst assembly handles both the
+same way - the most complete declaration per block wins:
+
+```sql
+-- true multi-part transmissions only
+SELECT DISTINCT flight_number, dep_date, message_count, distinct_parts,
+       max_part, complete, burst_pxe, burst_px6
+FROM pnl_bursts
+WHERE distinct_parts > 1
+ORDER BY last_received_at DESC;
+
+-- re-send clusters (separate complete transmissions, not parts)
+SELECT DISTINCT flight_number, dep_date, message_count, burst_pxe, burst_px6
+FROM pnl_bursts
+WHERE message_count > 1 AND distinct_parts = 1;
+```
+
+**From a burst row back to its messages.** The `burst_key` is
+`flight/boarding/dep_day+dep_month/ana/arrival_hour` — rebuild it to list the
+message ids:
+
+```sql
+SELECT r.id, r.msg_type, r.part_number, r.received_at,
+       json_extract(f.facts_json, '$.terminator') AS terminator,
+       json_extract(f.facts_json, '$.pxe') AS pxe,
+       json_extract(f.facts_json, '$.px6') AS px6
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+WHERE r.flight_number || '/' ||
+      COALESCE(json_extract(f.facts_json, '$.boarding_airport'), '') || '/' ||
+      COALESCE(json_extract(f.facts_json, '$.dep_day'), '') ||
+      COALESCE(json_extract(f.facts_json, '$.dep_month'), '') || '/' ||
+      COALESCE(json_extract(f.facts_json, '$.ana'), '') || '/' ||
+      strftime('%Y%m%d%H', r.received_at) = 'CX841/JFK/08JUN//2026060915'
+ORDER BY r.received_at;
+```
+
+Read any of them with `python -m amg show --db amg_messages.db <id>`
+(`--plain` for the un-redacted copy).
 
 ### 12.7 FORWARD (FWD)
 

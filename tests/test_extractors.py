@@ -499,7 +499,9 @@ def test_pnl_burst_view_assembles_multi_part_transmission(tmp_path, make_archive
     assert by_class["Y"]["block_actual_parsed_pax"] == 12
     # burst-level assembled totals and completeness gate
     for r in rows:
-        assert r["part_count"] == 3
+        assert r["message_count"] == 3
+        assert r["distinct_parts"] == 3
+        assert r["max_part"] == 3
         assert r["complete"] == 1
         assert r["burst_pxe"] == 36 + 281
         assert r["ana"] == "787498"
@@ -539,7 +541,9 @@ def test_pnl_burst_view_marks_incomplete_bursts(tmp_path, make_archive):
     row = con.execute(
         "SELECT * FROM pnl_burst"
     ).fetchone()
-    assert row["part_count"] == 2
+    assert row["message_count"] == 2
+    assert row["distinct_parts"] == 2
+    assert row["max_part"] == 2
     assert row["complete"] == 0
     assert row["burst_pxe"] == 281
 
@@ -632,6 +636,46 @@ def test_pnl_burst_view_hkg_multicabin_blocks_are_not_downline(tmp_path, make_ar
         assert r["burst_pxe"] == 331
         assert r["burst_px6"] == 0
         assert r["action"] == "arrival+departure"
+
+
+def test_pnl_burst_view_distinguishes_resends_from_true_parts(tmp_path, make_archive):
+    # CX841-style case: several single-part PNLs re-sent within the same hour
+    # (all PART1, each a complete ENDPNL transmission) are NOT a multi-part
+    # burst. message_count > 1 but distinct_parts == 1 and max_part == 1.
+    def resend_body(blocks, term="ENDPNL"):
+        lines = [
+            "\r\n\x01QD HKGTSXH\r\n",
+            ".JFDPNCX 153800\r\n",
+            "\x02PNL\r\n",
+            "CX841/08JUN JFK PART1\r\n",
+        ]
+        lines += [f"-{b}\r\n" for b in blocks]
+        lines += [f"{term}\r\n", "\x03\r\n"]
+        return "".join(lines)
+
+    archive_dir = tmp_path / "AMG_msg"
+    archive_dir.mkdir(exist_ok=True)
+    make_archive(
+        archive_dir / "PROCESSED_20260609_1538.tar.Z",
+        {
+            "HKG/260609153800001.rcv": resend_body(["HKG000F", "HKG003J", "HKG021Y"]),
+            "HKG/260609154000002.rcv": resend_body(["HKG003J"]),
+            "HKG/260609154500003.rcv": resend_body(["HKG000F", "HKG003J", "HKG021Y"]),
+        },
+    )
+    db = tmp_path / "index.db"
+    assert main(["ingest", str(archive_dir), "--db", str(db)]) == 0
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    rows = con.execute("SELECT * FROM pnl_burst").fetchall()
+    assert len(rows) == 3
+    for r in rows:
+        assert r["message_count"] == 3
+        assert r["distinct_parts"] == 1
+        assert r["max_part"] == 1
+        assert r["complete"] == 1
+        # the assembly takes the most complete declaration per block
+        assert r["burst_pxe"] == 24
 
 
 def test_pnl_bursts_cache_backfills_on_first_ingest(tmp_path, make_archive):

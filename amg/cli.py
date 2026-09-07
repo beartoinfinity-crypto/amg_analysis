@@ -106,7 +106,9 @@ CREATE TABLE IF NOT EXISTS pnl_bursts (
   dep_date TEXT,
   ana TEXT,
   last_received_at TEXT,
-  part_count INTEGER,
+  message_count INTEGER,
+  distinct_parts INTEGER,
+  max_part INTEGER,
   complete INTEGER,
   burst_pxe INTEGER,
   burst_px6 INTEGER,
@@ -261,6 +263,7 @@ WITH parts AS (
          json_extract(f.facts_json, '$.dep_month') AS dep_month,
          COALESCE(json_extract(f.facts_json, '$.ana'), '') AS ana,
          CAST(json_extract(f.facts_json, '$.final') AS INTEGER) AS final,
+         COALESCE(r.part_number, 1) AS part_number,
          json_extract(s.data_json, '$.dest') AS dest,
          json_extract(s.data_json, '$.cabin_class') AS cabin_class,
          json_extract(s.data_json, '$.declared_total') AS declared_total,
@@ -315,7 +318,9 @@ meta AS (
          MAX(dep_month) AS dep_month,
          NULLIF(MAX(ana), '') AS ana,
          MAX(received_at) AS last_received_at,
-         COUNT(DISTINCT message_id) AS part_count,
+         COUNT(DISTINCT message_id) AS message_count,
+         COUNT(DISTINCT part_number) AS distinct_parts,
+         MAX(part_number) AS max_part,
          MAX(final) AS complete
   FROM parts
   GROUP BY burst_key
@@ -341,7 +346,8 @@ totals AS (
 )
 SELECT m.burst_key, m.flight_number, m.msg_type, m.boarding_airport,
        m.dep_day || ' ' || m.dep_month AS dep_date,
-       m.ana, m.last_received_at, m.part_count, m.complete,
+       m.ana, m.last_received_at, m.message_count, m.distinct_parts,
+       m.max_part, m.complete,
        t.burst_pxe, t.burst_px6,
        CASE WHEN m.boarding_airport = 'HKG' THEN 'departure'
             WHEN h.hkg_seen IS NOT NULL THEN 'arrival+departure'
@@ -698,7 +704,7 @@ def ingest_archives(archive_paths, db_path, progress=None, should_stop=None):
         con.execute("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')")
         con.commit()
     cache_rows = con.execute("SELECT COUNT(*) FROM pnl_bursts").fetchone()[0]
-    if ingested and (not touched_flights or not cache_rows):
+    if not cache_rows:
         refresh_burst_cache(con)
     elif touched_flights:
         refresh_burst_cache(con, sorted(touched_flights))
@@ -712,11 +718,16 @@ def _migrate(con):
     ``CREATE TABLE IF NOT EXISTS`` never adds columns to a table that already
     exists and never replaces an existing view, so older databases need
     explicit migration here. Currently adds ``messages.raw_text_plain`` and
-    re-creates ``messages_readable`` to expose it.
+    re-creates ``messages_readable`` to expose it. A pnl_bursts cache from a
+    previous shape is dropped - it is derived data, and the next ingest
+    auto-backfills it.
     """
     cols = {c[1] for c in con.execute("PRAGMA table_info(messages)")}
     if "raw_text_plain" not in cols:
         con.execute("ALTER TABLE messages ADD COLUMN raw_text_plain TEXT")
+    burst_cols = {c[1] for c in con.execute("PRAGMA table_info(pnl_bursts)")}
+    if burst_cols and "distinct_parts" not in burst_cols:
+        con.execute("DROP TABLE pnl_bursts")
     # Always rebuild the readable view so it tracks the current column set.
     con.execute("DROP VIEW IF EXISTS messages_readable")
     con.executescript(build_schema())
