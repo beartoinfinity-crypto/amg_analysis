@@ -753,6 +753,106 @@ def test_pnl_bursts_cache_refreshes_touched_flights_incrementally(tmp_path, make
     assert all(r["burst_pxe"] == 55 and r["burst_px6"] == 50 for r in oz)
 
 
+def test_pnl_remaps_cache_backfills_on_first_ingest(tmp_path, make_archive):
+    # First ingest with an empty cache: pnl_remaps backfills fully, and
+    # querying the view is instant (no on-demand aggregation).
+    lines = [
+        "\r\n\x01QD HKGTSXH\r\n",
+        ".ICNPNKE 221053\r\n",
+        "\x02PNL\r\n",
+        "KE2011/23AUG ICN PART1\r\n",
+        "-HKG010Y\r\n",
+        "-SYD120Y\r\n",
+        "-AKL030Y\r\n",
+        "ENDPNL\r\n",
+        "\x03\r\n",
+    ]
+    con = ingest_text(tmp_path, make_archive, "".join(lines))
+    cached = con.execute("SELECT * FROM pnl_remaps").fetchall()
+    assert len(cached) == 1
+    row = cached[0]
+    assert row["flight_number"] == "KE2011"
+    assert row["pax_on_board"] == 160  # 10 + 120 + 30
+    assert row["pxe"] == 160
+    assert row["px6"] == 150          # SYD120 + AKL030
+    assert row["no_action"] == 0      # upstream boarding
+    assert row["segment_count"] == 3
+    # view wraps cache: same result
+    via_view = con.execute("SELECT * FROM pnl_remap").fetchall()
+    assert len(via_view) == 1
+    assert via_view[0]["pax_on_board"] == 160
+
+
+def test_pnl_remaps_cache_refreshes_touched_flights_incrementally(tmp_path, make_archive):
+    # Ingest flight A; then ingest flight B: only B's rows are refreshed,
+    # A's cached rows survive untouched.
+    def pnl_body(flight, blocks):
+        lines = [
+            "\r\n\x01QD HKGTSXH\r\n",
+            f".ICNPNKE 221053\r\n",
+            "\x02PNL\r\n",
+            f"{flight}/23AUG ICN PART1\r\n",
+        ]
+        lines += [f"-{b}\r\n" for b in blocks]
+        lines += ["ENDPNL\r\n", "\x03\r\n"]
+        return "".join(lines)
+
+    archive_dir = tmp_path / "AMG_msg"
+    archive_dir.mkdir(exist_ok=True)
+    make_archive(archive_dir / "PROCESSED_20260822_1901.tar.Z",
+                 {"ICN/260822190100001.rcv": pnl_body("KE2011", ["HKG010Y", "SYD120Y"])})
+    db = tmp_path / "index.db"
+    assert main(["ingest", str(archive_dir), "--db", str(db)]) == 0
+
+    make_archive(archive_dir / "PROCESSED_20260822_1902.tar.Z",
+                 {"ICN/260822190200001.rcv": pnl_body("OZ8811", ["HKG005Y", "BKK050Y"])})
+    assert main(["ingest", str(archive_dir), "--db", str(db)]) == 0
+
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    flights = sorted(r["flight_number"] for r in con.execute(
+        "SELECT DISTINCT flight_number FROM pnl_remaps"))
+    assert flights == ["KE2011", "OZ8811"]
+
+    ke = con.execute(
+        "SELECT * FROM pnl_remaps WHERE flight_number='KE2011'"
+    ).fetchone()
+    assert ke["pax_on_board"] == 130   # 10 + 120
+    assert ke["pxe"] == 130
+    assert ke["px6"] == 120
+    oz = con.execute(
+        "SELECT * FROM pnl_remaps WHERE flight_number='OZ8811'"
+    ).fetchone()
+    assert oz["pax_on_board"] == 55    # 5 + 50
+    assert oz["pxe"] == 55
+    assert oz["px6"] == 50
+
+
+def test_pnl_remaps_rebuild_clears_cache(tmp_path, make_archive):
+    # rebuild_archives clears pnl_remaps and re-backfills on re-ingest.
+    body = (
+        "\r\n\x01QD HKGTSXH\r\n"
+        ".ICNPNKE 221053\r\n"
+        "\x02PNL\r\n"
+        "KE2011/23AUG ICN PART1\r\n"
+        "-HKG010Y\r\n"
+        "-SYD120Y\r\n"
+        "ENDPNL\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    assert con.execute("SELECT COUNT(*) FROM pnl_remaps").fetchone()[0] == 1
+    con.close()
+    # rebuild from the same archive dir: cache is cleared, then backfilled
+    archive_dir = tmp_path / "AMG_msg"
+    assert main(["ingest", str(archive_dir), "--db", str(tmp_path / "index.db")]) == 0
+    con = sqlite3.connect(str(tmp_path / "index.db"))
+    con.row_factory = sqlite3.Row
+    row = con.execute("SELECT * FROM pnl_remaps").fetchone()
+    assert row["pax_on_board"] == 130
+    assert row["segment_count"] == 2
+
+
 def test_pnl_aggregates_pxe_px6_for_upstream_boarding(tmp_path, make_archive):
     # PNL sent from SYD with legs SIN -> HKG -> SFO -> JFK: arrival at HKG
     # carries everyone downline; PX6 is only the HKG further-stops (SFO, JFK).

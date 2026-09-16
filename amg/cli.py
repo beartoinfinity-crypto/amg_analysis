@@ -120,8 +120,37 @@ CREATE TABLE IF NOT EXISTS pnl_bursts (
   block_actual_parsed_pax INTEGER,
   PRIMARY KEY (burst_key, dest, cabin_class)
 );
+CREATE TABLE IF NOT EXISTS pnl_remaps (
+  message_id INTEGER PRIMARY KEY,
+  received_at TEXT,
+  msg_type TEXT,
+  flight_number TEXT,
+  flight_airport TEXT,
+  flight_date TEXT,
+  carrier TEXT,
+  flight_no TEXT,
+  suffix TEXT,
+  dep_day TEXT,
+  dep_month TEXT,
+  boarding_airport TEXT,
+  part_number INTEGER,
+  cfg TEXT,
+  name_rows TEXT,
+  identifier_rows TEXT,
+  ssrs TEXT,
+  pxe INTEGER,
+  px6 INTEGER,
+  no_action INTEGER,
+  arrival_action TEXT,
+  departure_action TEXT,
+  changes INTEGER,
+  pax_on_board INTEGER,
+  segment_count INTEGER
+);
 CREATE INDEX IF NOT EXISTS idx_messages_type_flight
   ON messages (msg_type, flight_number);
+CREATE INDEX IF NOT EXISTS idx_segments_message
+  ON message_segments (message_id);
 CREATE INDEX IF NOT EXISTS idx_pnl_bursts_flight
   ON pnl_bursts (flight_number, complete);
 CREATE VIEW IF NOT EXISTS messages_readable AS
@@ -210,19 +239,16 @@ PNL_VIEW_COLUMNS = [
 ]
 
 
-def _pnl_view_sql():
-    """Analytics view over structured PNL/ADL facts (RP 1708).
+def _pnl_remap_select_sql(extra_where=""):
+    """Per-message PNL/ADL SELECT for cache refresh filtering.
 
-    Like ldm_remap but no INTERFACE_COLUMN_MAPPINGS involvement - NAME_LIST
-    facts are never remapped, so every column reads its natural key. Adds a
-    boarded total (`pax_on_board`) and destination-leg count derived from the
-    per-segment rows.
+    ``extra_where`` is injected into the WHERE clause (e.g. an AND
+    flight_number IN (...) filter) so cache refreshes can prune the scan
+    to touched flights.
     """
     selects = [f"json_extract(f.facts_json, '$.{key}') AS \"{col}\"" for col, key in PNL_VIEW_COLUMNS]
     selects_sql = ",\n       ".join(selects)
     return f"""
-DROP VIEW IF EXISTS pnl_remap;
-CREATE VIEW pnl_remap AS
 SELECT r.id AS message_id, r.received_at, r.msg_type, r.flight_number,
        r.flight_airport, r.flight_date,
        {selects_sql},
@@ -233,8 +259,23 @@ SELECT r.id AS message_id, r.received_at, r.msg_type, r.flight_number,
 FROM messages_readable r
 JOIN message_facts f ON f.message_id = r.id
 LEFT JOIN message_segments s ON s.message_id = r.id
-WHERE r.msg_type IN ('PNL', 'ADL')
+WHERE r.msg_type IN ('PNL', 'ADL'){extra_where}
 GROUP BY r.id;
+"""
+
+
+def _pnl_view_sql():
+    """Analytics view over structured PNL/ADL facts (RP 1708).
+
+    Like ldm_remap but no INTERFACE_COLUMN_MAPPINGS involvement - NAME_LIST
+    facts are never remapped, so every column reads its natural key. Adds a
+    boarded total (``pax_on_board``) and destination-leg count derived from the
+    per-segment rows. Reads from the ``pnl_remaps`` cache table for instant
+    results; the cache is auto-refreshed at ingest time.
+    """
+    return f"""
+DROP VIEW IF EXISTS pnl_remap;
+CREATE VIEW pnl_remap AS SELECT * FROM pnl_remaps;
 """
 
 
@@ -670,6 +711,31 @@ def refresh_burst_cache(con, flights=None):
     con.commit()
 
 
+def refresh_message_cache(con, flights=None):
+    """Rebuild pnl_remaps cache rows.
+
+    With ``flights``, only those flights are refreshed (deleted then
+    recomputed). Without ``flights``, the whole cache is rebuilt. Empty cache
+    + no flights still does a full rebuild, so the first ingest backfills
+    automatically.
+    """
+    con.executescript(build_schema())
+    if flights:
+        qmarks = ",".join("?" * len(flights))
+        con.execute(f"DELETE FROM pnl_remaps WHERE flight_number IN ({qmarks})",
+                    flights)
+        con.execute(
+            "INSERT INTO pnl_remaps " + _pnl_remap_select_sql(
+                f" AND r.flight_number IN ({qmarks})"
+            ),
+            flights,
+        )
+    else:
+        con.execute("DELETE FROM pnl_remaps")
+        con.execute("INSERT INTO pnl_remaps " + _pnl_remap_select_sql())
+    con.commit()
+
+
 def ingest_archives(archive_paths, db_path, progress=None, should_stop=None):
     _probe_writable(db_path)
     con = sqlite3.connect(db_path)
@@ -708,6 +774,11 @@ def ingest_archives(archive_paths, db_path, progress=None, should_stop=None):
         refresh_burst_cache(con)
     elif touched_flights:
         refresh_burst_cache(con, sorted(touched_flights))
+    msg_cache_rows = con.execute("SELECT COUNT(*) FROM pnl_remaps").fetchone()[0]
+    if not msg_cache_rows:
+        refresh_message_cache(con)
+    elif touched_flights:
+        refresh_message_cache(con, sorted(touched_flights))
     con.close()
     return ingested, skipped, failed
 
@@ -728,6 +799,9 @@ def _migrate(con):
     burst_cols = {c[1] for c in con.execute("PRAGMA table_info(pnl_bursts)")}
     if burst_cols and "distinct_parts" not in burst_cols:
         con.execute("DROP TABLE pnl_bursts")
+    remap_cols = {c[1] for c in con.execute("PRAGMA table_info(pnl_remaps)")}
+    if remap_cols and "pax_on_board" not in remap_cols:
+        con.execute("DROP TABLE pnl_remaps")
     # Always rebuild the readable view so it tracks the current column set.
     con.execute("DROP VIEW IF EXISTS messages_readable")
     con.executescript(build_schema())
@@ -758,6 +832,7 @@ def rebuild_archives(archive_paths, db_path, progress=None, should_stop=None):
     con.execute("DELETE FROM message_segments")
     con.execute("DELETE FROM message_facts")
     con.execute("DELETE FROM pnl_bursts")
+    con.execute("DELETE FROM pnl_remaps")
     con.execute("DELETE FROM messages")
     con.execute("DELETE FROM archives")
     con.commit()

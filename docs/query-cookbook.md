@@ -16,6 +16,8 @@ Tables involved:
 | `archives` | ingested archive names + sizes (used by dedup logic) |
 | `pnl_burst` | view: multi-part PNL/ADL transmission assembled to burst level — completeness gate (`complete` = final terminator seen), per-(dest,cabin) block totals, burst `pxe`/`px6` (computed on demand; slow on the full corpus) |
 | `pnl_bursts` | cache table of the same burst assembly, refreshed automatically at the end of every ingest (incrementally for touched flights) — query this for fast repeated PXE/PX6 lookups |
+| `pnl_remaps` | per-message PNL/ADL facts cache — flight element, boarding airport, part number, `pxe`/`px6`, `no_action`, `pax_on_board` (sum of all leg declared totals), `segment_count`; refreshed automatically at ingest time |
+| `pnl_remap` | view wrapping `pnl_remaps` (identical columns; query either — the view reads from the cache for instant results) |
 
 ---
 
@@ -327,7 +329,9 @@ ORDER BY r.received_at DESC, s.seq;
 Multi-leg routing metrics (PXE/PX6) and PNL aggregate view. `pnl_remap` is a
 dedicated view (like `ldm_remap`) turning the PNL/ADL facts into columns -
 flight element, boarding airport, part number, `pxe`/`px6`, `no_action`,
-`pax_on_board` (sum of all leg declared totals) and `segment_count`:
+`pax_on_board` (sum of all leg declared totals) and `segment_count`.
+The view reads from the `pnl_remaps` cache table (auto-refreshed at ingest
+time), so queries are instant:
 
 ```sql
 SELECT received_at, msg_type, flight_number, flight_airport, boarding_airport,
