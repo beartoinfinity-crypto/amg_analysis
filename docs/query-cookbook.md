@@ -411,8 +411,9 @@ skeleton):
 ```sql
 SELECT r.received_at, r.flight_number, r.boarding_airport,
        r.segment_count, r.pxe, r.px6,
-       r.message_text_plain
+       m.message_text_plain
 FROM pnl_remap r
+JOIN messages_readable m ON m.id = r.message_id
 WHERE r.segment_count > 1
 ORDER BY r.received_at DESC
 LIMIT 20;
@@ -456,9 +457,10 @@ SELECT r.flight_number, r.received_at, r.boarding_airport,
        GROUP_CONCAT(DISTINCT json_extract(s.data_json, '$.dest'))
          AS all_stops,
        r.segment_count,
-       r.message_text_plain
+       m.message_text_plain
 FROM pnl_remap r
 JOIN message_segments s ON s.message_id = r.message_id
+JOIN messages_readable m ON m.id = r.message_id
 WHERE r.boarding_airport != 'HKG'
 GROUP BY r.message_id
 HAVING COUNT(DISTINCT json_extract(s.data_json, '$.dest')) > 1
@@ -474,9 +476,10 @@ SELECT r.flight_number, r.received_at, r.boarding_airport,
        GROUP_CONCAT(DISTINCT json_extract(s.data_json, '$.dest'))
          AS stops,
        r.segment_count,
-       r.message_text_plain
+       m.message_text_plain
 FROM pnl_remap r
 JOIN message_segments s ON s.message_id = r.message_id
+JOIN messages_readable m ON m.id = r.message_id
 WHERE r.boarding_airport != 'HKG'
 GROUP BY r.message_id
 HAVING COUNT(DISTINCT json_extract(s.data_json, '$.dest')) > 1
