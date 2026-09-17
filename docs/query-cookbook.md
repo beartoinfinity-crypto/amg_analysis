@@ -19,6 +19,33 @@ Tables involved:
 | `pnl_remaps` | per-message PNL/ADL facts cache — flight element, boarding airport, part number, `pxe`/`px6`, `no_action`, `pax_on_board` (sum of all leg declared totals), `segment_count`; refreshed automatically at ingest time |
 | `pnl_remap` | view wrapping `pnl_remaps` (identical columns; query either — the view reads from the cache for instant results) |
 
+**Flight identity.** A unique flight is the composite of `flight_number` +
+`scheduled_date` + `direction` (arrival / departure). The same flight number
+operates daily; the same flight on the same date can have both arrival and
+departure PNLs. When filtering, always combine at least `flight_number` +
+`flight_date` (or `dep_day`+`dep_month`) to avoid mixing rotations:
+
+```sql
+-- unique flight: CX841 departing 25 AUG 2026
+SELECT *
+FROM pnl_remap
+WHERE flight_number = 'CX841'
+  AND dep_day || dep_month = '25AUG'
+  AND boarding_airport = 'HKG'          -- departure from HKG
+ORDER BY received_at;
+```
+
+```sql
+-- same flight number, same date, different direction (arrival into HKG)
+SELECT *
+FROM pnl_remap
+WHERE flight_number = 'CX841'
+  AND dep_day || dep_month = '25AUG'
+  AND boarding_airport != 'HKG'         -- boarding upstream
+  AND no_action = 0
+ORDER BY received_at;
+```
+
 ---
 
 ## 1. Message content by type
