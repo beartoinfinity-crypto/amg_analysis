@@ -431,6 +431,58 @@ WHERE r.msg_type IN ('PNL', 'ADL')
 ORDER BY r.received_at DESC, s.seq;
 ```
 
+Stopovers: find flights with more than one stop (not direct to HKG). Each
+segment `dest` is a stop the aircraft makes — passengers can only disembark
+where the plane stops. Count distinct destinations per message to find
+stopovers:
+
+```sql
+-- count of direct vs stopover flights (upstream boarding only)
+SELECT stops, COUNT(*) AS messages FROM (
+  SELECT r.message_id,
+         COUNT(DISTINCT json_extract(s.data_json, '$.dest')) AS stops
+  FROM pnl_remap r
+  JOIN message_segments s ON s.message_id = r.message_id
+  WHERE r.boarding_airport != 'HKG'
+  GROUP BY r.message_id
+) GROUP BY stops ORDER BY stops;
+```
+
+Flights with stopovers before HKG (upstream boarding, HKG is one of the
+stops):
+
+```sql
+SELECT r.flight_number, r.received_at, r.boarding_airport,
+       GROUP_CONCAT(DISTINCT json_extract(s.data_json, '$.dest'))
+         AS all_stops,
+       r.segment_count,
+       r.message_text_plain
+FROM pnl_remap r
+JOIN message_segments s ON s.message_id = r.message_id
+WHERE r.boarding_airport != 'HKG'
+GROUP BY r.message_id
+HAVING COUNT(DISTINCT json_extract(s.data_json, '$.dest')) > 1
+   AND SUM(CASE WHEN json_extract(s.data_json, '$.dest') = 'HKG'
+                THEN 1 ELSE 0 END) > 0
+ORDER BY r.received_at DESC;
+```
+
+All stopovers (2+ distinct stops) with raw message:
+
+```sql
+SELECT r.flight_number, r.received_at, r.boarding_airport,
+       GROUP_CONCAT(DISTINCT json_extract(s.data_json, '$.dest'))
+         AS stops,
+       r.segment_count,
+       r.message_text_plain
+FROM pnl_remap r
+JOIN message_segments s ON s.message_id = r.message_id
+WHERE r.boarding_airport != 'HKG'
+GROUP BY r.message_id
+HAVING COUNT(DISTINCT json_extract(s.data_json, '$.dest')) > 1
+ORDER BY r.received_at DESC;
+```
+
 ## 9. FWD - forward booking, multi-hop
 
 Header level:
