@@ -278,6 +278,19 @@ WHERE r.msg_type = 'PTM'
 ORDER BY r.received_at DESC, s.seq;
 ```
 
+Multi-segment PTMs (more than one connecting flight) with raw message:
+
+```sql
+SELECT r.received_at, r.flight_number,
+       json_extract(f.facts_json, '$.segments') AS segments,
+       r.message_text
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+WHERE r.msg_type = 'PTM'
+  AND json_extract(f.facts_json, '$.segments') > 1
+ORDER BY r.received_at DESC;
+```
+
 ## 7. PSM / PAL / CAL - special assistance + CAL deltas
 
 ```sql
@@ -364,6 +377,33 @@ WHERE r.msg_type IN ('PNL', 'ADL')
 ORDER BY received_at DESC;
 ```
 
+Multi-destination PNL/ADL (more than one leg) with un-redacted raw message
+(`message_text_plain` preserves PII - use `message_text` for the redacted
+skeleton):
+
+```sql
+SELECT r.received_at, r.flight_number, r.boarding_airport,
+       r.segment_count, r.pxe, r.px6,
+       r.message_text_plain
+FROM pnl_remap r
+WHERE r.segment_count > 1
+ORDER BY r.received_at DESC
+LIMIT 20;
+```
+
+Per-destination breakdown for a multi-leg PNL (showing cabin splits):
+
+```sql
+SELECT r.flight_number, r.received_at, r.boarding_airport,
+       s.dest, s.cabin_class, s.declared_total, s.actual_parsed_pax,
+       r.message_text_plain
+FROM messages_readable r
+JOIN message_segments s ON s.message_id = r.id
+WHERE r.msg_type IN ('PNL', 'ADL')
+  AND r.flight_number = 'KE2011'
+ORDER BY r.received_at DESC, s.seq;
+```
+
 ## 9. FWD - forward booking, multi-hop
 
 Header level:
@@ -409,6 +449,36 @@ FROM messages_readable r
 JOIN message_facts f ON f.message_id = r.id
 JOIN message_segments s ON s.message_id = r.id
 WHERE r.msg_type = 'FWD'
+ORDER BY r.received_at DESC, s.seq;
+```
+
+Multi-hop FWD (more than one connecting flight) with raw message:
+
+```sql
+SELECT r.received_at, r.flight_number, r.flight_airport,
+       json_extract(f.facts_json, '$.hops')        AS hops,
+       json_extract(f.facts_json, '$.destination')  AS final_dest,
+       json_extract(f.facts_json, '$.crew')         AS crew,
+       r.message_text
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+WHERE r.msg_type = 'FWD'
+  AND json_extract(f.facts_json, '$.hops') > 1
+ORDER BY r.received_at DESC;
+```
+
+Per-hop route detail for a multi-hop FWD:
+
+```sql
+SELECT r.flight_number, r.received_at,
+       json_extract(s.data_json, '$.hop')         AS hop_airport,
+       json_extract(s.data_json, '$.flight')      AS connect_flight,
+       json_extract(s.data_json, '$.destination') AS next_dest,
+       json_extract(s.data_json, '$.detail')      AS detail
+FROM messages_readable r
+JOIN message_segments s ON s.message_id = r.id
+WHERE r.msg_type = 'FWD'
+  AND r.flight_number = 'AA021'
 ORDER BY r.received_at DESC, s.seq;
 ```
 
