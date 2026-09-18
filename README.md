@@ -6,8 +6,11 @@ SQLite database; questions are answered from the index in seconds.
 
 ## Install
 
-Requires Python 3.13+ and the system `tar` command (present by default on
-Windows 10+, macOS, and Linux).
+Source execution requires Python 3.13+. The GUIs also require tkinter/Tcl-Tk.
+Archive ingestion requires the system `tar` command (present by default on
+Windows 10+, macOS, and Linux); the standalone message generator does not.
+The packaged generator executable needs neither Python nor the archive database.
+The sender requires `requests` and `cryptography` (for encrypted config).
 
 ```console
 pip install -e .
@@ -40,6 +43,93 @@ Double-click `run.bat` (or run `python -m amg gui`). The window lists every
 Progress shows per archive; the final summary appears in the status bar. If the
 database is open in DB Browser (or another program) you will see a clear
 "database is locked" message instead of silent failures - close it and retry.
+
+### Standalone test-message generator
+
+This is a separate window, not an extension of the archive loader. On a Windows
+PC, double-click `dist\AMGMessageGenerator.exe` from a local build; only the
+executable needs copying. It embeds Python, Tk and the small JSON template
+library, not `amg_messages.db`. The current build is approximately 10.8 MB.
+It targets Windows 10/11 **x64**; startup was smoke-tested on Windows 10 x64,
+not independently on Windows 11. The executable is unsigned.
+
+From a source checkout, double-click `start_gen_gui.bat` or run:
+
+```powershell
+python -m amg.gen_gui
+python -m amg.gen_gui --templates "amg\message_templates.json"
+python -m amg.gen_gui --db "amg_messages.db"
+```
+
+`--templates` and `--db` are aliases: both accept JSON libraries or existing
+AMG databases. With no argument, the generator loads the bundled
+`amg/message_templates.json`, independently of the current working directory.
+The default library contains 17 synthetic examples across 12 message types:
+PNL, ADL, MVT, MVA, LDM, PTM, PSM, PAL, CAL, FWD, ASM and DIV. It includes
+direct, multiple-destination and paired multipart PNL examples; it is not a
+copy of the historical archive or a comprehensive protocol conformance suite.
+
+1. Choose a message type and select a template. Optional flight and scheduled
+   date filters select the **source template**, not the generated flight.
+2. Enter replacements in the recognized flight/date/airport/pax fields; blank
+   values keep the original. Choose the test direction relative to HKG.
+3. Click **Apply fields to template**, then review or manually edit the preview.
+   Applying fields again starts from the original template and asks before
+   discarding manual edits.
+4. Copy the preview or save `.txt` / framed `.rcv`. Exports use Latin-1 and CRLF;
+   framed export requires a standalone recognized message-type line.
+5. Click **Send** to POST the message to the configured API endpoint. The
+   generator loads config from `.env` or `.env.enc` (see below).
+
+The generator opens historical databases read-only. Un-redacted database
+originals require opt-in; neither the redacted column nor user-supplied JSON
+is guaranteed anonymous. Review before sharing.
+
+**Current limits:** structured editing recognizes selected patterns for PNL,
+ADL, MVT, MVA, LDM, FWD and ASM; other formats use manual preview editing.
+Pax edits do not regenerate passenger names or recalculate dependent cabin,
+weight, PAD or SI totals. Multipart examples are edited/exported separately.
+A unique flight is `flight_number + scheduled_date + direction`; direction is
+currently test metadata used in the suggested filename, not an automatic route
+rewrite or enforced identity. Date edits retain the original header format,
+so a day-only header does not encode the chosen month/year.
+
+For the JSON contract and extension points, see the standalone generator
+section in [docs/architecture.md](docs/architecture.md).
+
+#### Sender configuration
+
+The Send button POSTs messages to the AMG API. Config lives in a `.env` file
+(in the `amg/` package directory for source runs, or next to the exe for
+packaged builds).
+
+```
+API_URL=https://chilunsing.com/v1/amg
+API_KEY=Basic UkVTVF9BTUc6a1VrZXp0cUtRTDVXMYYTTT=
+```
+
+Copy `amg/.env.example` to `amg/.env` and fill in your values. The `API_KEY`
+is the full `Basic ...` authorization header value.
+
+To encrypt the config (so the plaintext isn't stored on disk):
+
+```powershell
+python -m amg.encrypt_config                    # encrypts amg/.env -> amg/.env.enc
+python -m amg.encrypt_config --input .env       # custom input path
+python -m amg.encrypt_config --output out.enc   # custom output path
+```
+
+You will be prompted for a master password (entered twice to confirm). After
+encrypting, delete the plaintext `.env`. The generator will prompt for the
+master password when you click Send.
+
+For packaged builds, place `.env` or `.env.enc` next to the exe and encrypt
+from that directory:
+
+```powershell
+cd dist
+python -m amg.encrypt_config --input .env --output .env.enc
+```
 
 ### 1. Build the index
 
@@ -119,10 +209,11 @@ Lists every archive as `indexed` or `pending`.
 
 ## How it works
 
-**One seam.** All behaviour is reachable through one entry point -
-`amg.cli.main(argv)` (and the GUI, which is a thin layer over the same core
-functions). Archives are treated as immutable inputs; every derived fact lives
-in the database so it can be recomputed at any time. Structured facts live in
+**Separate application seams.** Archive operations use `amg.cli.main(argv)`
+and the archive GUI over the same core functions. The independent generator
+uses `amg.gen_gui.main(argv)` over `amg.generator` helpers and a JSON library
+or read-only database. Archives are treated as immutable inputs; every derived
+fact lives in the database so it can be recomputed at any time. Structured facts live in
 `message_facts` (one row per extracted message); repeating rows (PTM transfers,
 FWD hops, LDM destination segments) live in `message_segments`.
 
@@ -217,10 +308,21 @@ logic, and development traps are documented in
 [docs/architecture.md](docs/architecture.md).
 
 ```console
-python -m pytest               # fast unit suite (CLI seam only)
+python -m pytest               # fast unit suite (CLI and generator seams)
 python -m pytest -o addopts="" # full suite incl. real-corpus integration test
 python -m mypy amg             # type check
+python -m pytest tests/test_generator.py  # generator-only tests
+python -m pytest tests/test_sender.py     # sender + config encryption tests
 ```
 
-Tests drive only the public CLI against fixture archives and assert on stdout,
-exit codes, and the database's public schema.
+Build the standalone generator executable (requires PyInstaller):
+
+```powershell
+python -m pip install pyinstaller
+.\build_gen_gui.bat
+# -> dist\AMGMessageGenerator.exe
+```
+
+Tests drive the public CLI and generator entry points against fixture archives
+and libraries and assert on stdout, exit codes, and the database's public
+schema.

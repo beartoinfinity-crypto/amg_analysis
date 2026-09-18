@@ -286,7 +286,7 @@ def test_ldm_new_style_dotted_line_parses(tmp_path, make_archive):
         "FROM: Air China Hong Kong Airport Station\r\n"
         "QUOTE\r\n"
         "LDM\r\n"
-        "CA0111/16MAY26.B8579.J30G16Y255.03/12\r\n"
+        "CA0111/16MAY26.B-8579.J30G16Y255.03/12\r\n"
         "-HKG.208/36/0.0.T18797\r\n"
         "\x03\r\n",
     )
@@ -335,7 +335,7 @@ def test_movement_registration_with_hyphen_keeps_airport(tmp_path, make_archive)
         "PAX215+0INF\r\n"
         "\x03\r\n",
     )
-    assert row == envelope("MVT", "QD", "HKGTSXH", "HKGRCCI", "VJ986", "VN-A544",
+    assert row == envelope("MVT", "QD", "HKGTSXH", "HKGRCCI", "VJ986", "VNA544",
                            "PQC", flight_date="20260622")
 
 

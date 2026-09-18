@@ -242,6 +242,28 @@ def test_ldm_supports_interface_column_mapping(tmp_path, make_archive):
         INTERFACE_COLUMN_MAPPINGS.update(snapshot)
 
 
+def test_ldm_reg_mark_strips_hyphens(tmp_path, make_archive):
+    body = (
+        "\r\n\x01QU HKGTSXH\r\n"
+        ".HKGRCCI 082010\r\n"
+        "\x02LDM\r\n"
+        "VJ986/08.VN-A544.Y210.2/4\r\n"
+        "-HKG.215/2/0.T12345.PAX/215.PAD/0\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["AMG_REG"] == "VNA544"
+    row = con.execute(
+        "SELECT aircraft_reg, raw_text_plain FROM messages"
+    ).fetchone()
+    assert row["aircraft_reg"] == "VNA544"
+    assert "VN-A544" in row["raw_text_plain"]
+
+
 def test_ptm_extracts_transfer_segments_without_names(tmp_path, make_archive):
     body = (
         "\r\n\x01QD HKGTSXH\r\n"

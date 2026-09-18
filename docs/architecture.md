@@ -11,13 +11,21 @@ amg/cli.py      core: parsing, ingestion, query commands, argparse entry point
 amg/extractors.py per-family extractors: MVT, LDM, DIV, PTM, PSM/PAL/CAL, PNL/ADL, FWD, ASM
 amg/gui.py      thin tkinter layer over cli core functions (no business logic)
 amg/__main__.py enables `python -m amg`
-tests/          pytest suite; drives only public seams (CLI + database schema)
-run.bat         double-click launcher -> `python -m amg gui`
+amg/generator.py template-library access, structured replacements and export
+amg/gen_gui.py  standalone tkinter generator -> `python -m amg.gen_gui`
+amg/message_templates.json bundled synthetic template library
+start_gen_gui.bat source generator launcher (forwards arguments)
+gen_gui_launcher.py PyInstaller entry point for the generator
+build_gen_gui.bat Windows onefile executable build
+tests/          CLI, database, pure helper and generator GUI tests
+run.bat         double-click archive loader -> `python -m amg gui`
 ```
 
-Design stance: **one deep module** (`cli.py`) behind one seam (`main(argv)`).
-The GUI and any future interface must stay thin clients over the same core
-functions so behaviour has exactly one home and tests exercise reality.
+The archive CLI and loader GUI share the core functions in `cli.py`.
+The standalone generator is a separate application: `gen_gui.py` owns widgets
+and `generator.py` owns template access, field edits and export. It does not
+import the loader or ingestion pipeline. Keep editing logic independent of Tk
+so it can be tested without opening a window.
 
 ---
 
@@ -389,7 +397,6 @@ returns 1.
 
 Thin by design: widget wiring only; all work happens in `ingest_archives` /
 `rebuild_archives` / `scan_archives`.
-
 - `ArchivePicker.__init__` builds Treeview whose first column is a checkbox
   glyph toggled by click (`on_click`) or the Select-all checkbutton.
 - Pending archives pre-tick on `refresh()`; state text comes from
@@ -408,6 +415,201 @@ Thin by design: widget wiring only; all work happens in `ingest_archives` /
 
 ---
 
+## Standalone generator (`amg/generator.py`, `amg/gen_gui.py`)
+
+Independent of the loader. Entry point: `python -m amg.gen_gui
+[--templates PATH|--db PATH]` (aliases; default bundled JSON). The executable
+is built with PyInstaller from `gen_gui_launcher.py` via `build_gen_gui.bat`.
+
+### Data sources
+
+`generator.default_template_path()` resolves `message_templates.json` beside
+the module, so the PyInstaller `--add-data "amg\message_templates.json;amg"`
+bundle lands next to it. Paths ending `.json` (case-insensitive) use the
+template library; anything else opens SQLite with a `mode=ro` URI so historical
+databases cannot be modified. `message_types`, `templates` and `load_template`
+provide the shared interface. Search uses exact type and optional exact
+flight/date filters, returning at most 100 rows by default: JSON library
+order versus newest receipt first for SQLite. JSON is reloaded on access,
+not cached. Database mode reads `raw_text` by default; un-redacted
+`raw_text_plain` requires opt-in and is not a fallback for missing text.
+Supported families use `generator.SUPPORTED` (editing) and `MESSAGE_TYPES`
+(framed export keywords).
+
+### JSON template contract (version 1)
+
+Top-level object with `version: 1` and a `templates` list. Each entry needs a
+unique integer `id`; non-empty `msg_type`, `flight_number`, `flight_date`
+(`YYYYMMDD`, validated with `date.fromisoformat`), `flight_airport` and
+`text`; optional integer-or-null `part_number` and display `name`.
+`read_template_library` validates this and raises `ValueError` with a short
+reason; the GUI surfaces that text. JSON rows emulate the SQL tuple shape
+`(id, flight_number, flight_date, flight_airport, name, part_number)`; the
+`plain` flag is ignored for JSON (both checkbox and value).
+
+Minimal library example (UTF-8 JSON; `\n` escapes become message line breaks):
+
+```json
+{
+  "version": 1,
+  "templates": [
+    {
+      "id": 1,
+      "name": "Synthetic arrival",
+      "msg_type": "PNL",
+      "flight_number": "ZZ100",
+      "flight_date": "20260917",
+      "flight_airport": "BKK",
+      "part_number": 1,
+      "text": "QD HKGTSXH\n.TESTAAA 170900\nPNL\nZZ100/17SEP BKK PART1\n-HKG001Y-PAD000\n1TESTALPHA/ALICE\nENDPNL\n"
+    }
+  ]
+}
+```
+
+Metadata is for selection; loading does not derive or rewrite the body from
+it. Keep flight/date/airport/part metadata consistent with the text. `name`
+is optional display content; current validation does not type-check it.
+Custom JSON is not sanitized automatically. Use synthetic names and test
+identifiers; do not copy historical passenger details into bundled resources.
+A unique operational flight is `flight_number + scheduled_date + direction`,
+not a template ID or a receipt time. Several templates/messages can represent
+that flight; the generator does not enforce this identity or persist a
+structured direction field in the library.
+
+### Editing pipeline
+
+`normalize_text` strips framing bytes and normalizes newlines before field
+detection. `editable_fields(text, msg_type)` returns `Field(label, kind,
+start, end, value)` records with absolute offsets into the normalized text:
+header flight/date/airports, `-XXX` destination blocks, PNL/ADL per-block
+declared pax and PAD, LDM adults/children/infants, MVT/MVA pax and movement
+airports. `apply_fields` validates via `field_value` (flight, 3-letter
+airport, bounded counts zero-padded to original width, dates re-rendered at
+the original granularity) and patches right-to-left so earlier offsets stay
+valid. Unknown formats return no fields; manual preview editing still works.
+
+### GUI threading and export
+
+Search runs on a daemon worker posting to a `queue.Queue`; `poll_results`
+drains it on a repeating `root.after`. This mirrors the loader GUI rule that
+workers never touch widgets. `save_message` exports Latin-1 CRLF, framing
+`.rcv` requires a standalone recognized keyword line, and the GUI refuses a
+target equal to the active library. Passenger-count edits do not regenerate
+names or dependent totals; direction is metadata in the suggested filename.
+`review_warnings` flags historical PII risk, unsupported headers, day-only
+date granularity and unmatched multipart text.
+
+The Send button loads config via `sender.load_config()` (which may prompt for
+a master password if `.env.enc` is in use), then sends on a daemon thread.
+Log output streams into a `tk.Text` panel below the preview. The button
+disables during the request and re-enables on completion or error.
+
+### Sender (`amg/sender.py`, `amg/encrypt_config.py`)
+
+The generator GUI integrates a Send button that POSTs the current preview to
+the AMG API. `sender.py` owns config loading, message escaping and the HTTP
+call; `encrypt_config.py` is a standalone CLI for encrypting the config file.
+
+#### Config resolution
+
+`_default_config_dir()` returns the `amg/` package directory for source runs,
+or `Path(sys.executable).parent` for PyInstaller frozen builds. `load_config`
+looks for `.env.enc` first (prompts for a master password), then `.env`. An
+explicit path overrides both (`--config PATH` or `--templates` on the GUI).
+
+Required keys:
+
+| Key | Value |
+| --- | --- |
+| `API_URL` | Endpoint URL, e.g. `https://chilunsing.com/v1/amg` |
+| `API_KEY` | Full authorization header, e.g. `Basic UkVTVF9BTUc6a1VrZXp0cUtRTDVXMYYTTT=` |
+
+The payload always sends `systemName: SITA`, `messageType: IATATYPEB`,
+`_apiVersion: 1` alongside the escaped message body.
+
+#### Encryption
+
+`encrypt_env_file(path, password)` reads a plaintext `.env`, derives a Fernet
+key from the password via PBKDF2-HMAC-SHA256 (480k iterations, random 16-byte
+salt), and writes a JSON blob containing `salt` + `token`. `decrypt_env_bytes`
+reverses the process. `encrypt_config.py` prompts for the password twice and
+rejects passwords under 4 characters.
+
+```powershell
+python -m amg.encrypt_config                    # encrypts amg/.env -> amg/.env.enc
+python -m amg.encrypt_config --input .env       # custom input path
+python -m amg.encrypt_config --output out.enc   # custom output path
+```
+
+After encrypting, delete the plaintext `.env`. The generator GUI will prompt
+for the master password on the first Send click.
+
+#### Message escaping and sending
+
+`convert_to_escaped(text)` normalizes newlines to `\r\n` and strips trailing
+spaces per line. `send_message(text, config)` sends the escaped body as JSON
+with Basic auth and returns `{"status_code": int, "body": str|None,
+"success": bool}`.
+
+The Send button in `gen_gui.py` runs the POST on a daemon thread; log output
+appears in the Send log panel. Config is loaded once per send; no credentials
+are cached between requests.
+
+### Building and extending the Windows executable
+
+Run from the repository root on Windows x64 with Python 3.13+ and working Tk.
+PyInstaller is build-only, not a runtime dependency. A dedicated environment
+keeps packaging tools separate from application development:
+
+```powershell
+python -m venv .venv-build
+.\.venv-build\Scripts\python.exe -m pip install "pyinstaller==6.16.0"
+.\.venv-build\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile --windowed --name AMGMessageGenerator --add-data "amg\message_templates.json;amg" gen_gui_launcher.py
+```
+
+Alternatively, `build_gen_gui.bat` runs the same build using `python` on PATH;
+it does not install PyInstaller. It checks the JSON file exists, not its
+contents, so run generator tests before packaging. PyInstaller 6.16.0 with
+Python 3.13.14 was used for the initial Windows 10 x64 build; dependencies
+are not fully locked. Outputs are `dist/AMGMessageGenerator.exe`, temporary
+`build/` files and a generated `AMGMessageGenerator.spec`. The batch script
+builds from the launcher, not the spec: keep build changes in the script.
+Do not package the historical database or archive directory.
+
+The onefile build embeds Tcl/Tk, Python and the JSON and extracts runtime
+resources into a temporary directory on launch. Do not write changes to the
+bundled JSON there. To change defaults, edit the source JSON, validate and
+rebuild; to use an external library, select it in the GUI or launch:
+
+```powershell
+.\dist\AMGMessageGenerator.exe --templates "C:\TestData\templates.json"
+```
+
+For a new message pattern, extend `editable_fields` and its validation tests,
+not the GUI callbacks. Add the type to `SUPPORTED` only when structured edits
+exist and to `MESSAGE_TYPES` for framed export. Add synthetic templates with
+unique IDs; preserve the version-1 contract or add an explicit migration for
+future incompatible changes. Do not replace whole-text tokens when only a
+particular header/block field should change.
+
+Release verification: run `python -m pytest tests/test_generator.py` and
+`python -m mypy amg`, then build. Copy only the executable to another folder
+without the source tree or DB; open it, select a bundled template, apply an
+edit and export it. Repeat on clean Windows 10 and Windows 11 x64 machines
+without Python before claiming both platforms validated. Initial verification
+covered automated source GUI tests and executable startup on Windows 10;
+Windows 11 and full packaged-UI interaction still need explicit testing.
+
+### Limitations
+
+Structured recognition is pattern-based, not a protocol conformance suite;
+the bundled library is synthetic and small (17 templates, 12 types). No
+in-app library editor; edit the JSON by hand following the contract above.
+The executable is unsigned; SmartScreen may warn on first run.
+
+---
+
 ## Testing strategy
 
 - Everything goes through `main([...])` (the seam) or pure helpers; asserts
@@ -423,6 +625,18 @@ Thin by design: widget wiring only; all work happens in `ingest_archives` /
   Typecheck: `python -m mypy amg`.
 - Expected values in tests are independent literals (measured corpus facts),
   never copies of implementation outputs.
+- Generator tests cover `message_types`, `templates`, `load_template`,
+  `editable_fields`, `apply_fields`, `save_message` against fixture JSON
+  libraries and SQLite DBs; JSON validation failure cases; read-only DB proof.
+- Generator GUI tests instantiate `MessageGenerator` with a real `tk.Tk()`
+  (skipped when no display), drive selection, field apply, invalid-input error
+  surfacing, manual preview export and re-search; the bundled-library variant
+  asserts the JSON path and disabled plain checkbox.
+- Sender tests cover `_parse_env`, Fernet encrypt/decrypt roundtrip, config
+  loading from `.env` and `.env.enc`, missing-key rejection, and `send_message`
+  with mocked `requests.post` (success and HTTP error).
+- Run the focused suite with `python -m pytest tests/test_generator.py`.
+- Run sender tests with `python -m pytest tests/test_sender.py`.
 - Lock-simulation tests hold `BEGIN EXCLUSIVE` on a second connection; note
   readers are blocked too in rollback-journal mode - assert THROUGH the
   blocking connection.
@@ -445,3 +659,9 @@ Thin by design: widget wiring only; all work happens in `ingest_archives` /
   anomalies if corrupt archives become interesting.
 - Windows console output of `show` assumes CRLF-consistent corpus (see
   cmd_show note).
+- Generator: structured edits are pattern-based; pax/name/weight consistency
+  is manual (see the Standalone generator section for the full list).
+- Generator JSON libraries are reloaded per access; large hand-maintained
+  libraries reparse on each search/load.
+- Sender: `.env.enc` uses PBKDF2 with 480k iterations per decrypt; the first
+  Send after launch may lag briefly while deriving the key.

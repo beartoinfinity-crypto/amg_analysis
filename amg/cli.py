@@ -466,7 +466,7 @@ def _match_flight_dot(line):
     return {
         "flight_number": match.group(1),
         "flight_date": match.group(2),
-        "aircraft_reg": match.group(3),
+        "aircraft_reg": match.group(3).replace("-", ""),
         "flight_airport": match.group(4),
     }
 
@@ -502,7 +502,7 @@ def _match_ldm_new(line):
     return {
         "flight_number": match.group(1),
         "flight_date": match.group(2) + year_suffix,
-        "aircraft_reg": match.group(4),
+        "aircraft_reg": match.group(4).replace("-", ""),
     }
 
 

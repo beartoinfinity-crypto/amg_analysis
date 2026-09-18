@@ -439,7 +439,7 @@ def _ldm_header(raw_text):
         if g["suffix"]:
             facts["suffix"] = g["suffix"]
         if g["reg"]:
-            facts["reg"] = g["reg"].upper()
+            facts["reg"] = g["reg"].upper().replace("-", "")
         if g["type"]:
             facts["ac_type"] = g["type"].upper()
         if crew_ckpt or crew_cab:

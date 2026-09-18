@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "templates": [
+    {
+      "id": 1, "name": "Synthetic direct arrival", "msg_type": "PNL", "flight_number": "ZZ100", "flight_date": "20260917", "flight_airport": "BKK", "part_number": 1,
+      "text": "QD HKGTSXH\n.TESTAAA 170900\nPNL\nZZ100/17SEP BKK PART1\n-HKG002Y-PAD000\n1TESTALPHA/ALICE\n1TESTBETA/BOB\nENDPNL\n"
+    },
+    {
+      "id": 2, "name": "Synthetic multiple destination blocks", "msg_type": "PNL", "flight_number": "ZZ101", "flight_date": "20260917", "flight_airport": "DXB", "part_number": 1,
+      "text": "QD HKGTSXH\n.TESTAAA 170900\nPNL\nZZ101/17SEP DXB PART1\n-BKK001Y-PAD000\n1TESTALPHA/ALICE\n-HKG001Y-PAD000\n1TESTBETA/BOB\nENDPNL\n"
+    },
+    {
+      "id": 3, "name": "Synthetic multipart 1 of 2", "msg_type": "PNL", "flight_number": "ZZ102", "flight_date": "20260917", "flight_airport": "HKG", "part_number": 1,
+      "text": "QD HKGTSXH\n.TESTAAA 170900\nPNL\nZZ102/17SEP HKG PART1\n-NRT002Y-PAD000\n1TESTALPHA/ALICE\nENDPART1\n"
+    },
+    {
+      "id": 4, "name": "Synthetic multipart 2 of 2", "msg_type": "PNL", "flight_number": "ZZ102", "flight_date": "20260917", "flight_airport": "HKG", "part_number": 2,
+      "text": "QD HKGTSXH\n.TESTAAA 170900\nPNL\nZZ102/17SEP HKG PART2\n-NRT002Y-PAD000\n1TESTBETA/BOB\nENDPNL\n"
+    },
+    {
+      "id": 5, "name": "Synthetic ADD and DEL", "msg_type": "ADL", "flight_number": "ZZ100", "flight_date": "20260917", "flight_airport": "BKK", "part_number": 1,
+      "text": "QD HKGTSXH\n.TESTAAA 171000\nADL\nZZ100/17SEP BKK PART1\nANA/1\n-HKG002Y-PAD000\nADD\n1TESTGAMMA/CAROL\nDEL\n1TESTALPHA/ALICE\nENDADL\n"
+    },
+    {
+      "id": 6, "name": "Synthetic departure", "msg_type": "MVT", "flight_number": "ZZ200", "flight_date": "20260917", "flight_airport": "HKG",
+      "text": "QD HKGTSXH\n.TESTAAA 170900\nMVT\nZZ200/17.BTEST.HKG\nAD0900/0915 EA1100 NRT\nPAX002\nSI TEST MESSAGE ONLY\n"
+    },
+    {
+      "id": 7, "name": "Synthetic arrival", "msg_type": "MVT", "flight_number": "ZZ201", "flight_date": "20260917", "flight_airport": "BKK",
+      "text": "QD HKGTSXH\n.TESTAAA 171200\nMVT\nZZ201/17.BTEST.BKK\nTD1150 AA1200\nPAX002\nSI TEST MESSAGE ONLY\n"
+    },
+    {
+      "id": 8, "name": "Synthetic movement advice", "msg_type": "MVA", "flight_number": "ZZ202", "flight_date": "20260917", "flight_airport": "HKG",
+      "text": "QD HKGTSXH\n.TESTAAA 170900\nMVA\nZZ202/17.BTEST.HKG\nED0930 EA1130 NRT\nPAX002\nSI TEST MESSAGE ONLY\n"
+    },
+    {
+      "id": 9, "name": "Synthetic load single destination", "msg_type": "LDM", "flight_number": "ZZ300", "flight_date": "20260917", "flight_airport": "HKG",
+      "text": "QD HKGTSXH\n.TESTAAA 170900\nLDM\nZZ300/17SEP26.BTEST.Y180.2/4\n-NRT.2/0/0.0.T40.1/40\n.PAX/2.PAD/0\nSI\nTEST MESSAGE ONLY\n"
+    },
+    {
+      "id": 10, "name": "Synthetic load multiple destinations", "msg_type": "LDM", "flight_number": "ZZ301", "flight_date": "20260917", "flight_airport": "DXB",
+      "text": "QD HKGTSXH\n.TESTAAA 170900\nLDM\nZZ301/17SEP26.BTEST.Y180.2/4\n-BKK.1/0/0.0.T20.1/20\n.PAX/1.PAD/0\n-HKG.1/0/0.0.T20.1/20\n.PAX/1.PAD/0\nSI\nTEST MESSAGE ONLY\n"
+    },
+    {
+      "id": 11, "name": "Synthetic transfers (manual detail editing)", "msg_type": "PTM", "flight_number": "ZZ400", "flight_date": "20260917", "flight_airport": "HKG",
+      "text": "QD HKGTSXH\n.TESTAAA 170900\nPTM\nZZ400/17SEP HKG\nPX2 BG2\nZZ401/17SEP NRT 1Y 1B\nZZ402/17SEP SIN 1Y 1B\n"
+    },
+    {
+      "id": 12, "name": "Synthetic special assistance (manual editing)", "msg_type": "PSM", "flight_number": "ZZ500", "flight_date": "20260917", "flight_airport": "HKG",
+      "text": "QD HKGTSXH\n.TESTAAA 170900\nPSM\nZZ500/17SEP HKG\n1TESTALPHA/ALICE\n.R/WCHR\n1PAX\n"
+    },
+    {
+      "id": 13, "name": "Synthetic assistance list (manual editing)", "msg_type": "PAL", "flight_number": "ZZ501", "flight_date": "20260917", "flight_airport": "HKG",
+      "text": "QD HKGTSXH\n.TESTAAA 170900\nPAL\nZZ501/17SEP HKG\n1TESTALPHA/ALICE\n.R/WCHR\n1PAX\n"
+    },
+    {
+      "id": 14, "name": "Synthetic assistance changes (manual editing)", "msg_type": "CAL", "flight_number": "ZZ501", "flight_date": "20260917", "flight_airport": "HKG",
+      "text": "QD HKGTSXH\n.TESTAAA 171000\nCAL\nZZ501/17SEP HKG\nADD\n1TESTBETA/BOB\n.R/BLND\n1PAX\n"
+    },
+    {
+      "id": 15, "name": "Synthetic forward bookings two blocks", "msg_type": "FWD", "flight_number": "ZZ600", "flight_date": "20260917", "flight_airport": "TPE",
+      "text": "QD HKGTSXH\n.TESTAAA 170900\nFWD\nZZ600/17.TPE.2/4/0\n-HKG.B2.R1.A0.L0.T40\n.P\nZZ601 NRT 1Y 1B\n-SIN.B1.R0.A0.L0.T20\nENDFWD\n"
+    },
+    {
+      "id": 16, "name": "Synthetic schedule change (manual detail editing)", "msg_type": "ASM", "flight_number": "ZZ700", "flight_date": "20260917", "flight_airport": "HKG",
+      "text": "QD HKGTSXH\n.TESTAAA 170900\nASM\nUTC\nTIM\nZZ700/17SEP26\nHKG0900 NRT1300\nSI TEST MESSAGE ONLY\n"
+    },
+    {
+      "id": 17, "name": "Synthetic diversion (manual editing)", "msg_type": "DIV", "flight_number": "ZZ800", "flight_date": "20260917", "flight_airport": "HKG",
+      "text": "QD HKGTSXH\n.TESTAAA 170900\nDIV\nZZ800/17.BTEST.HKG\nEA1000 TPE\nPOB8\nSI TEST MESSAGE ONLY\n"
+    }
+  ]
+}
