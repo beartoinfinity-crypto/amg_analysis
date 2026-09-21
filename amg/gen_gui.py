@@ -345,7 +345,10 @@ class MessageGenerator:
 
             self.root.after(0, _prompt)
             event.wait()
-            return result[0]
+            pw = result[0]
+            if pw:
+                self.config_password = pw
+            return pw
 
         def worker():
             try:
