@@ -3,6 +3,7 @@ import getpass
 import json
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -90,10 +91,19 @@ def decrypt_env_bytes(data: bytes, password: str) -> str:
     return Fernet(key).decrypt(token).decode('utf-8')
 
 
-def load_config(explicit_path: str | None = None, password: str | None = None) -> dict[str, str]:
+def load_config(
+    explicit_path: str | None = None,
+    password: str | None = None,
+    password_prompt: 'Callable[[], str] | None' = None,
+) -> dict[str, str]:
     path, is_encrypted = _find_config(explicit_path)
     if is_encrypted:
-        pw = password if password is not None else getpass.getpass('Config password: ')
+        if password is not None:
+            pw = password
+        elif password_prompt is not None:
+            pw = password_prompt()
+        else:
+            pw = getpass.getpass('Config password: ')
         raw = path.read_bytes()
         text = decrypt_env_bytes(raw, pw)
     else:

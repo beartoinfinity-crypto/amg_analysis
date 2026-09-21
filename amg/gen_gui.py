@@ -6,6 +6,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from tkinter import simpledialog
+
 from amg import generator, sender
 
 
@@ -108,14 +110,12 @@ class MessageGenerator:
         self.send_log.configure(yscrollcommand=log_scroll.set)
         log_scroll.pack(side='right', fill='y')
         self.send_log.pack(fill='both', expand=True)
-        self._append_log('Ready. Configure amg/.env or amg/.env.enc before sending.\n')
+        self._append_log('Ready. Load a template and click Send.\n')
 
         self.warning_var = tk.StringVar(value='Select a template library and template. No messages are sent or ingested.')
         ttk.Label(root, textvariable=self.warning_var, wraplength=1020, padding=8).pack(fill='x')
         self.poll_id = root.after(100, self.poll_results)
         self.send_queue: queue.Queue[tuple[str, str] | None] = queue.Queue()
-        self.send_log = None
-        self.send_btn = None
         self.config_password: str | None = None
         root.protocol('WM_DELETE_WINDOW', self.close)
         self.refresh_types()
@@ -328,9 +328,31 @@ class MessageGenerator:
         self._append_log('\n' + '=' * 40 + '\n')
         self._append_log('Loading config...\n')
 
+        def ask_password() -> str:
+            import threading as _threading
+            event = _threading.Event()
+            result: list[str] = []
+
+            def _prompt():
+                r = simpledialog.askstring(
+                    'Config password',
+                    'Enter master password for .env.enc:',
+                    show='*',
+                    parent=self.root,
+                )
+                result.append(r if r else '')
+                event.set()
+
+            self.root.after(0, _prompt)
+            event.wait()
+            return result[0]
+
         def worker():
             try:
-                config = sender.load_config(password=self.config_password)
+                config = sender.load_config(
+                    password=self.config_password,
+                    password_prompt=ask_password,
+                )
                 self._append_log(f'POST {config["API_URL"]}\n')
                 result = sender.send_message(text, config)
                 status = result['status_code']
