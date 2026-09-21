@@ -100,36 +100,29 @@ section in [docs/architecture.md](docs/architecture.md).
 #### Sender configuration
 
 The Send button POSTs messages to the AMG API. Config lives in a `.env` file
-(in the `amg/` package directory for source runs, or next to the exe for
-packaged builds).
+(in the repo root for source runs, or next to the exe for packaged builds).
 
 ```
 API_URL=https://chilunsing.com/v1/amg
 API_KEY=Basic UkVTVF9BTUc6a1VrZXp0cUtRTDVXMYYTTT=
 ```
 
-Copy `amg/.env.example` to `amg/.env` and fill in your values. The `API_KEY`
-is the full `Basic ...` authorization header value.
+Edit the `.env` file in the repo root (or next to the exe) and fill in your
+values. The `API_KEY` is the full `Basic ...` authorization header value.
 
 To encrypt the config (so the plaintext isn't stored on disk):
 
 ```powershell
-python -m amg.encrypt_config                    # encrypts amg/.env -> amg/.env.enc
-python -m amg.encrypt_config --input .env       # custom input path
-python -m amg.encrypt_config --output out.enc   # custom output path
+# Double-click encrypt_env.bat, or run:
+python -m amg.encrypt_config
 ```
 
-You will be prompted for a master password (entered twice to confirm). After
-encrypting, delete the plaintext `.env`. The generator will prompt for the
-master password when you click Send.
+You will be prompted for a master password (entered twice to confirm). This
+produces `.env.enc` and you can then delete `.env`. The generator prompts for
+the master password on the first Send click, then caches it for the session.
 
-For packaged builds, place `.env` or `.env.enc` next to the exe and encrypt
-from that directory:
-
-```powershell
-cd dist
-python -m amg.encrypt_config --input .env --output .env.enc
-```
+For packaged builds, place `.env` next to the exe, then double-click
+`encrypt_env.bat` or run `python -m amg.encrypt_config` from that directory.
 
 ### 1. Build the index
 

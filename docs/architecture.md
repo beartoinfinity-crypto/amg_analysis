@@ -518,6 +518,10 @@ or `Path(sys.executable).parent` for PyInstaller frozen builds. `load_config`
 looks for `.env.enc` first (prompts for a master password), then `.env`. An
 explicit path overrides both (`--config PATH` or `--templates` on the GUI).
 
+A `.env` template is provided in the repo root. Copy it next to the exe for
+packaged builds, or edit it in place for source runs. `encrypt_env.bat`
+encrypts `.env` to `.env.enc` with a double-click.
+
 Required keys:
 
 | Key | Value |
@@ -537,13 +541,16 @@ reverses the process. `encrypt_config.py` prompts for the password twice and
 rejects passwords under 4 characters.
 
 ```powershell
-python -m amg.encrypt_config                    # encrypts amg/.env -> amg/.env.enc
+# Double-click encrypt_env.bat, or run:
+python -m amg.encrypt_config                    # encrypts .env -> .env.enc
 python -m amg.encrypt_config --input .env       # custom input path
 python -m amg.encrypt_config --output out.enc   # custom output path
 ```
 
-After encrypting, delete the plaintext `.env`. The generator GUI will prompt
-for the master password on the first Send click.
+A `.env` template is provided in the repo root. Edit it with your values
+before encrypting. After encrypting, delete the plaintext `.env`. The
+generator GUI will prompt for the master password on the first Send click
+and cache it for the session.
 
 #### Message escaping and sending
 
@@ -553,8 +560,9 @@ with Basic auth and returns `{"status_code": int, "body": str|None,
 "success": bool}`.
 
 The Send button in `gen_gui.py` runs the POST on a daemon thread; log output
-appears in the Send log panel. Config is loaded once per send; no credentials
-are cached between requests.
+appears in the Send log panel. The master password is cached in memory for the
+session lifetime (prompted once on first Send, reused until the app closes).
+No credentials are written to disk beyond the `.env` / `.env.enc` files.
 
 ### Building and extending the Windows executable
 
