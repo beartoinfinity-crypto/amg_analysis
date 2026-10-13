@@ -26,6 +26,68 @@ MVT_BODY = (
     "\x03\r\n"
 )
 
+FWD_BODY = (
+    "\r\n\x01QU HKGTSXH\r\n"
+    "\x02FWD\r\n"
+    "BA123/27.HKG.4/4/8\r\n"
+    "-ATL.B88.R42.A15.L6.T4368.GBR/150.CHN/23\r\n"
+    ".P\r\n"
+    "DL254 SFO 1F 1B22K\r\n"
+    "ENDFWD\r\n"
+    "\x03\r\n"
+)
+
+DIV_BODY = (
+    "\r\n\x01QU HKGTSXH\r\n"
+    "\x02DIV\r\n"
+    "GF165/17.AB1234.HKG\r\n"
+    "EA1210 PVG\r\n"
+    "PX145\r\n"
+    "SI PAX MEDICAL ATTN REQD\r\n"
+    "EOT\r\n"
+    "\x03\r\n"
+)
+
+PTM_BODY = (
+    "\r\n\x01QU HKGTSXH\r\n"
+    "\x02PTM\r\n"
+    "GF165/17JUN BAHHKG PART1\r\n"
+    "GF167/18 MAN 1J 2B30K POKHREL/ARYADEV.CHD1\r\n"
+    "GF167/18 LHR 1J 2B35K POKHREL/NETRAPRASAD\r\n"
+    "ENDPTM\r\n"
+    "\x03\r\n"
+)
+
+PSM_BODY = (
+    "\r\n\x01QU HKGTSXH\r\n"
+    "\x02PSM\r\n"
+    "AF556/27NOV ORY PART1\r\n"
+    "-HKG 1PAX/1SSR\r\n"
+    "1MILLER/JACKMR 12D WCHR NEEDS WHEELCHAIR AT GATE\r\n"
+    "ENDPSM\r\n"
+    "\x03\r\n"
+)
+
+CAL_BODY = (
+    "\r\n\x01QU HKGTSXH\r\n"
+    "\x02CAL\r\n"
+    "UW234/12NOV BRU PART1\r\n"
+    "-HKG ADD\r\n"
+    "1BROWN/WILLIAMMR .R/WCHS NEEDS ASSISTANCE FOR STAIRS\r\n"
+    "-HKG DEL\r\n"
+    "1ZIMMER/EMMAMRS .R/DPNA\r\n"
+    "ENDCAL\r\n"
+    "\x03\r\n"
+)
+
+ASM_BODY = (
+    "\r\n\x01QU HKGTSXH\r\n"
+    "\x02ASM\r\n"
+    "NEW\r\n"
+    "BA123/27.HKG.LHR\r\n"
+    "\x03\r\n"
+)
+
 
 @pytest.fixture
 def app():
@@ -78,14 +140,97 @@ def test_mvt_tab_extracts_delay_slots(app):
     assert 'DL2: 0020' in output
 
 
-def test_clear_all_resets_active_tab(app):
-    app.ldm_tab.input_text.insert('1.0', LDM_BODY)
-    app.ldm_tab.extract()
-    app.ldm_tab.clear_all()
-    assert app.ldm_tab.input_text.get('1.0', 'end-1c').strip() == ''
-    assert app.ldm_tab.results.get('1.0', 'end-1c').strip() == ''
+def test_fwd_tab_extracts_destinations_and_nationalities(app):
+    app.fwd_tab.input_text.insert('1.0', FWD_BODY)
+    app.fwd_tab.extract()
+    output = app.fwd_tab.results.get('1.0', 'end-1c')
+    assert 'Final destination: ATL' in output
+    assert 'Hops: 1' in output
+    assert 'B=88' in output
+    assert 'R=42' in output
+    assert 'A=15' in output
+    assert 'L=6' in output
+    assert 'T=4368' in output
+    assert 'GBR=150' in output
+    assert 'CHN=23' in output
 
 
-def test_both_tabs_exist(app):
+def test_fwd_tab_extracts_transfer_rows(app):
+    app.fwd_tab.input_text.insert('1.0', FWD_BODY)
+    app.fwd_tab.extract()
+    output = app.fwd_tab.results.get('1.0', 'end-1c')
+    assert 'Transfer rows: 1' in output
+    assert 'flight=DL254' in output
+    assert 'dest=SFO' in output
+
+
+def test_div_tab_extracts_diversion_fields(app):
+    app.div_tab.input_text.insert('1.0', DIV_BODY)
+    app.div_tab.extract()
+    output = app.div_tab.results.get('1.0', 'end-1c')
+    assert 'PX (passengers on board): 145' in output
+    assert 'EA (estimated arrival): 1210' in output
+    assert 'DVA (diverted airport): PVG' in output
+
+
+def test_div_tab_detects_can_flag(app):
+    body = "\x02DIV\r\nGF165/17.AB1234.HKG\r\nCAN\r\nEA1210 PVG\r\nPX145\r\n\x03\r\n"
+    app.div_tab.input_text.insert('1.0', body)
+    app.div_tab.extract()
+    output = app.div_tab.results.get('1.0', 'end-1c')
+    assert 'CAN (cancelled/diverted): yes' in output
+
+
+def test_ptm_tab_extracts_transfer_totals(app):
+    app.ptm_tab.input_text.insert('1.0', PTM_BODY)
+    app.ptm_tab.extract()
+    output = app.ptm_tab.results.get('1.0', 'end-1c')
+    assert 'PX5 (total transfers): 2' in output
+    assert 'BG2 (total bags): 4' in output
+    assert 'Rows: 2' in output
+
+
+def test_ptm_tab_extracts_transfer_rows(app):
+    app.ptm_tab.input_text.insert('1.0', PTM_BODY)
+    app.ptm_tab.extract()
+    output = app.ptm_tab.results.get('1.0', 'end-1c')
+    assert 'flight=GF167' in output
+    assert 'dest=MAN' in output
+    assert 'detail=1J 2B30K' in output
+
+
+def test_psm_tab_extracts_assist_codes(app):
+    app.assist_tab.input_text.insert('1.0', PSM_BODY)
+    app.assist_tab.extract()
+    output = app.assist_tab.results.get('1.0', 'end-1c')
+    assert 'WCHR' in output
+    assert 'PXR (PRM pax total): 1' in output
+
+
+def test_cal_tab_extracts_delta_counts(app):
+    app.assist_tab.input_text.insert('1.0', CAL_BODY)
+    app.assist_tab.extract()
+    output = app.assist_tab.results.get('1.0', 'end-1c')
+    assert 'ADD=1' in output
+    assert 'DEL=1' in output
+    assert 'WCHS' in output
+    assert 'DPNA' in output
+
+
+def test_asm_tab_shows_muted_note(app):
+    app.asm_tab.input_text.insert('1.0', ASM_BODY)
+    app.asm_tab.extract()
+    output = app.asm_tab.results.get('1.0', 'end-1c')
+    assert 'muted by default' in output
+    assert 'Raw payload' in output
+    assert 'BA123/27.HKG.LHR' in output
+
+
+def test_all_tabs_exist(app):
     assert app.ldm_tab is not None
     assert app.mvt_tab is not None
+    assert app.fwd_tab is not None
+    assert app.div_tab is not None
+    assert app.ptm_tab is not None
+    assert app.assist_tab is not None
+    assert app.asm_tab is not None

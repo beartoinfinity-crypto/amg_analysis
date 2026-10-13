@@ -26,7 +26,7 @@ DEST_TOKEN_RE = re.compile(r"^[A-Z]{3}$")
 DELAY_SLOT_RE = re.compile(r"\d{1,2}")
 DVA_ETA_RE = re.compile(r"^E[A-Z]?(\d{4})\s+([A-Z]{3})\s*$", re.MULTILINE)
 CAN_RE = re.compile(r"(?<![A-Z])CAN(?![A-Z])")
-POB_RE = re.compile(r"\bPOB(\d+)\b", re.IGNORECASE)
+POB_RE = re.compile(r"\b(?:POB|PX)(\d+)\b", re.IGNORECASE)
 CABIN_RUN_RE = re.compile(r"\b((?:[JFCYG]\d{1,3}){2,})(?![A-Z0-9])")
 CABIN_PAIR_RE = re.compile(r"([JFCYG])(\d{1,3})")
 PAX_RE = re.compile(r"PAX/(\d+)/(\d+)/(\d+)")
@@ -41,11 +41,11 @@ PTM_ROW_RE = re.compile(
 )
 PX_RE = re.compile(r"\bPX(\d+)\b")
 BG_RE = re.compile(r"\bBG(\d+)\b")
-ASSIST_CODE_RE = re.compile(r"(?<![A-Z0-9])(WCHR|WCHC|WCHS|WCB|DEAF|BLND|MEDA|UMNR|MAAS|ESAN)(?![A-Z])")
+ASSIST_CODE_RE = re.compile(r"(?<![A-Z0-9])(WCHR|WCHC|WCHS|WCB|DEAF|BLND|MEDA|UMNR|MAAS|ESAN|DPNA)(?![A-Z])")
 NAME_ROW_RE = re.compile(r"^\d[A-Z]")
 IDENTIFIER_ROW_RE = re.compile(r"^\.[A-Z][A-Z0-9]{0,2}/")
 CFG_RE = re.compile(r"CFG/([A-Z0-9/]+)")
-OP_MARKER_RE = re.compile(r"^(ADD|DEL|CHG)\s*$", re.MULTILINE)
+OP_MARKER_RE = re.compile(r"(?:^|\s)(ADD|DEL|CHG)\s*$", re.MULTILINE)
 FWD_CREW_RE = re.compile(
     r"^(?:FWD)?([A-Z0-9]{2,3}\d+[A-Z]?)/\d+\.[A-Z]{3}\.(\d+/\d+/\d+)", re.ASCII
 )
@@ -592,12 +592,24 @@ def _ptm_row(line):
     flight, day, airports, rest = match.groups()
     tokens = rest.split()
     detail_tokens = [t for t in tokens if "/" not in t]
-    return {
+    row = {
         "flight": flight,
         "day": day,
         "airports": airports,
         "cabin_bags": " ".join(detail_tokens),
     }
+    for t in detail_tokens:
+        seats_cls = re.match(r"^(\d+)([A-Z])$", t)
+        if seats_cls:
+            row["seats"] = int(seats_cls.group(1))
+            row["class"] = seats_cls.group(2)
+            continue
+        bags = re.match(r"^(\d+)B(\d+)?([KL])?$", t)
+        if bags:
+            row["bags"] = int(bags.group(1))
+            if bags.group(2):
+                row["weight"] = int(bags.group(2))
+    return row
 
 
 def extract_transfer(raw_text):
@@ -616,6 +628,10 @@ def extract_transfer(raw_text):
             segments.append(row)
     if segments:
         facts["segments"] = len(segments)
+        if "total_transfers" not in facts:
+            facts["total_transfers"] = sum(s.get("seats", 0) for s in segments)
+        if "total_baggage" not in facts:
+            facts["total_baggage"] = sum(s.get("bags", 0) for s in segments)
     return facts, segments
 
 
@@ -624,7 +640,7 @@ def _assistance_facts(raw_text):
     delta = {op: 0 for op in ("ADD", "DEL", "CHG")}
     current = None
     for line in validate_lines(raw_text):
-        marker = OP_MARKER_RE.match(line.strip())
+        marker = OP_MARKER_RE.search(line.strip())
         if marker:
             current = marker.group(1)
             continue

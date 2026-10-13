@@ -174,6 +174,89 @@ def _extract_mvt(text):
     return lines
 
 
+def _extract_fwd(text):
+    facts, segments = extractors.extract_forward(text)
+    lines = ['=== FWD extracted facts ===']
+    if facts.get('crew'):
+        lines.append(f'  Crew: {facts["crew"]}')
+    if facts.get('destination'):
+        lines.append(f'  Final destination: {facts["destination"]}')
+    if facts.get('hops'):
+        lines.append(f'  Hops: {facts["hops"]}')
+    for dest in facts.get('destinations', []):
+        parts = [f'{k}={v}' for k, v in dest.items() if k != 'nationalities']
+        lines.append(f'  {dest.get("airport", "?")}: {", ".join(parts)}')
+        if dest.get('nationalities'):
+            nats = ', '.join(f'{c}={n}' for c, n in dest['nationalities'].items())
+            lines.append(f'    Nationalities: {nats}')
+    if facts.get('nationalities'):
+        lines.append(f'  Merged nationalities: {facts["nationalities"]}')
+    if facts.get('rows'):
+        lines.append(f'  Transfer rows: {facts["rows"]}')
+    lines.append('')
+    lines.append(f'=== Transfer rows ({len(segments)}) ===')
+    for i, seg in enumerate(segments, 1):
+        lines.append(f'  {i}. hop={seg["hop"]}, flight={seg["flight"]}, '
+                     f'dest={seg["destination"]}, detail={seg["detail"]}')
+    return lines
+
+
+def _extract_div(text):
+    facts = extractors.extract_diversion(text)
+    lines = ['=== DIV extracted facts ===']
+    if facts.get('can'):
+        lines.append(f'  CAN (cancelled/diverted): yes')
+    if 'pob' in facts:
+        lines.append(f'  PX (passengers on board): {facts["pob"]}')
+    if 'eta' in facts:
+        lines.append(f'  EA (estimated arrival): {facts["eta"]}')
+    if 'dva' in facts:
+        lines.append(f'  DVA (diverted airport): {facts["dva"]}')
+    return lines
+
+
+def _extract_ptm(text):
+    facts, segments = extractors.extract_transfer(text)
+    lines = ['=== PTM extracted facts ===']
+    if 'total_transfers' in facts:
+        lines.append(f'  PX5 (total transfers): {facts["total_transfers"]}')
+    if 'total_baggage' in facts:
+        lines.append(f'  BG2 (total bags): {facts["total_baggage"]}')
+    if 'segments' in facts:
+        lines.append(f'  Rows: {facts["segments"]}')
+    lines.append('')
+    lines.append(f'=== Transfer rows ({len(segments)}) ===')
+    for i, seg in enumerate(segments, 1):
+        lines.append(f'  {i}. flight={seg["flight"]}, day={seg["day"]}, '
+                     f'dest={seg["airports"]}, detail={seg["cabin_bags"]}')
+    return lines
+
+
+def _extract_assist(text):
+    facts = extractors.extract_assistance(text)
+    lines = ['=== PSM / PAL / CAL extracted facts ===']
+    if facts.get('assist_codes'):
+        lines.append(f'  Assist codes: {", ".join(facts["assist_codes"])}')
+    if facts.get('delta'):
+        d = facts['delta']
+        lines.append(f'  Delta: ADD={d.get("ADD", 0)}, '
+                     f'DEL={d.get("DEL", 0)}, CHG={d.get("CHG", 0)}')
+    if 'pax_total' in facts:
+        lines.append(f'  PXR (PRM pax total): {facts["pax_total"]}')
+    return lines
+
+
+def _extract_asm(text):
+    return [
+        '=== ASM (Ad-Hoc Schedule) ===',
+        'ASM messages are muted by default (ASM_AIRLINES_TO_PROCESS).',
+        'Raw payload stored in SITA_INCOMING_LOG for manual review.',
+        '',
+        '=== Raw payload ===',
+        text,
+    ]
+
+
 class MessageExtractor:
     def __init__(self, root):
         self.root = root
@@ -191,6 +274,27 @@ class MessageExtractor:
         self.mvt_tab = ExtractorTab(notebook, 'Paste raw MVT / MVA message (AHM 780)',
                                     _extract_mvt)
         notebook.add(self.mvt_tab.frame, text='MVT / MVA')
+
+        self.fwd_tab = ExtractorTab(notebook, 'Paste raw FWD message (SY311)',
+                                    _extract_fwd)
+        notebook.add(self.fwd_tab.frame, text='FWD')
+
+        self.div_tab = ExtractorTab(notebook, 'Paste raw DIV message (AHM 781)',
+                                    _extract_div)
+        notebook.add(self.div_tab.frame, text='DIV')
+
+        self.ptm_tab = ExtractorTab(notebook, 'Paste raw PTM message (RP 1718)',
+                                    _extract_ptm)
+        notebook.add(self.ptm_tab.frame, text='PTM')
+
+        self.assist_tab = ExtractorTab(notebook,
+                                       'Paste raw PSM / PAL / CAL message (RP 1715 / 1708a)',
+                                       _extract_assist)
+        notebook.add(self.assist_tab.frame, text='PSM / PAL / CAL')
+
+        self.asm_tab = ExtractorTab(notebook, 'Paste raw ASM message (IATA SSM)',
+                                    _extract_asm)
+        notebook.add(self.asm_tab.frame, text='ASM')
 
         self.status_var = tk.StringVar(value='Paste a message and click Extract.')
         ttk.Label(root, textvariable=self.status_var, padding=8).pack(fill='x')
