@@ -214,8 +214,61 @@ WHERE r.msg_type = 'LDM';
 """
 
 
+def _amg_pax_view_sql():
+    """Passenger-count view consolidating LDM, PNL/ADL and FWD pax data.
+
+    One row per message. LDM columns come from LOAD segments (pax_total,
+    adults, children, infants); PNL/ADL columns from NAME_LIST segments
+    (declared_total excluding PAD, pad_total, actual_parsed_pax); FWD
+    columns from FORWARD segments (bookings PXE, transfers PX5, air-to-air
+    PXT, sea/land PXU). NULL when the message has no segment data for that
+    family. This is the DB-facing query point for the AMG_PAX concept.
+    """
+    return """
+DROP VIEW IF EXISTS AMG_PAX;
+CREATE VIEW AMG_PAX AS
+SELECT
+    m.id AS message_id,
+    m.msg_type,
+    m.flight_number,
+    m.flight_date,
+    m.flight_airport,
+    MAX(CASE WHEN mf.family = 'LOAD'
+        THEN json_extract(ms.data_json, '$.pax_total') END) AS ldm_pax_total,
+    MAX(CASE WHEN mf.family = 'LOAD'
+        THEN json_extract(ms.data_json, '$.adults') END) AS ldm_adults,
+    MAX(CASE WHEN mf.family = 'LOAD'
+        THEN json_extract(ms.data_json, '$.children') END) AS ldm_children,
+    MAX(CASE WHEN mf.family = 'LOAD'
+        THEN json_extract(ms.data_json, '$.infants') END) AS ldm_infants,
+    MAX(CASE WHEN mf.family = 'LOAD'
+        THEN json_extract(ms.data_json, '$.dest') END) AS ldm_dest,
+    MAX(CASE WHEN mf.family = 'NAME_LIST'
+        THEN json_extract(ms.data_json, '$.declared_total') END) AS pnl_declared_total,
+    MAX(CASE WHEN mf.family = 'NAME_LIST'
+        THEN json_extract(ms.data_json, '$.pad_total') END) AS pnl_pad_total,
+    MAX(CASE WHEN mf.family = 'NAME_LIST'
+        THEN json_extract(ms.data_json, '$.actual_parsed_pax') END) AS pnl_actual_parsed_pax,
+    MAX(CASE WHEN mf.family = 'NAME_LIST'
+        THEN json_extract(ms.data_json, '$.dest') END) AS pnl_dest,
+    MAX(CASE WHEN mf.family = 'FORWARD'
+        THEN json_extract(ms.data_json, '$.bookings') END) AS fwd_bookings,
+    MAX(CASE WHEN mf.family = 'FORWARD'
+        THEN json_extract(ms.data_json, '$.transfers') END) AS fwd_transfers,
+    MAX(CASE WHEN mf.family = 'FORWARD'
+        THEN json_extract(ms.data_json, '$.air_to_air') END) AS fwd_air_to_air,
+    MAX(CASE WHEN mf.family = 'FORWARD'
+        THEN json_extract(ms.data_json, '$.sea_land') END) AS fwd_sea_land
+FROM messages m
+LEFT JOIN message_facts mf ON mf.message_id = m.id
+LEFT JOIN message_segments ms ON ms.message_id = m.id
+WHERE m.msg_type IN ('LDM', 'PNL', 'ADL', 'FWD')
+GROUP BY m.id;
+"""
+
+
 def build_schema():
-    return SCHEMA + _remap_view_sql() + _pnl_view_sql() + _pnl_burst_view_sql()
+    return SCHEMA + _remap_view_sql() + _pnl_view_sql() + _pnl_burst_view_sql() + _amg_pax_view_sql()
 
 
 PNL_VIEW_COLUMNS = [

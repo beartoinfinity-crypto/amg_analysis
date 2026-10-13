@@ -1420,3 +1420,59 @@ def test_unhandled_types_store_no_fact_row(tmp_path, make_archive):
     body = "\r\n\x01QU HKGTSXH\r\n.TYOXXZZ 070132\r\n\x02ZZZ\r\nhello\r\n\x03\r\n"
     con = ingest_text(tmp_path, make_archive, body)
     assert con.execute("SELECT COUNT(*) FROM message_facts").fetchone()[0] == 0
+
+
+def test_amg_pax_view_consolidates_ldm_and_pnl(tmp_path, make_archive):
+    """AMG_PAX view exposes one row per message with LDM, PNL and FWD pax columns."""
+    ldm_body = (
+        "\r\n\x01QD HKGTSXH\r\n"
+        ".SELWB7C 052051\r\n"
+        "\x02LDM\r\n"
+        "7C6013/05.HL8594.Y189.2/4\r\n"
+        "-HKG.147/2/0.T4399.1/541.2/1191.3/2667.PAX/149.PAD/0\r\n"
+        "\x03\r\n"
+    )
+    pnl_body = (
+        "\r\n\x01QD HKGTSXH\r\n"
+        ".HKGDMK 130900\r\n"
+        "\x02PNL\r\n"
+        "SL0365/13AUG HKG PART1\r\n"
+        "-DMK173Y-PAD000\r\n"
+        "ENDPNL\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, ldm_body)
+    # LDM row: ldm_pax_total populated, pnl columns NULL
+    row = con.execute(
+        "SELECT msg_type, ldm_pax_total, ldm_adults, ldm_children, ldm_infants,"
+        " pnl_declared_total, pnl_pad_total FROM AMG_PAX WHERE msg_type='LDM'"
+    ).fetchone()
+    assert row["ldm_pax_total"] == 149
+    assert row["ldm_adults"] == 147
+    assert row["ldm_children"] == 2
+    assert row["ldm_infants"] == 0
+    assert row["pnl_declared_total"] is None
+    assert row["pnl_pad_total"] is None
+
+    # Ingest a PNL in a second archive
+    archive_dir = tmp_path / "AMG_msg"
+    make_archive(
+        archive_dir / "PROCESSED_20260611_0025.tar.Z",
+        {"HKG/260607002540778.rcv": pnl_body},
+    )
+    import subprocess, sys
+    subprocess.run(
+        [sys.executable, "-m", "amg", "ingest", str(archive_dir),
+         "--db", str(tmp_path / "index.db")],
+        capture_output=True, check=True,
+    )
+    con2 = sqlite3.connect(str(tmp_path / "index.db"))
+    con2.row_factory = sqlite3.Row
+    row = con2.execute(
+        "SELECT msg_type, pnl_declared_total, pnl_pad_total, pnl_actual_parsed_pax,"
+        " ldm_pax_total FROM AMG_PAX WHERE msg_type='PNL'"
+    ).fetchone()
+    assert row["pnl_declared_total"] == 173
+    assert row["pnl_pad_total"] == 0
+    assert row["pnl_actual_parsed_pax"] == 0
+    assert row["ldm_pax_total"] is None
