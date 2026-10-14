@@ -2,15 +2,15 @@
 setlocal
 pushd "%~dp0" || exit /b 1
 
-if not exist "ldm_gui_launcher.py" (
-    echo ERROR: ldm_gui_launcher.py not found.
+if not exist "extractor_gui_launcher.py" (
+    echo ERROR: extractor_gui_launcher.py not found.
     pause
     exit /b 1
 )
 
 python -m PyInstaller --noconfirm --clean --onefile --windowed ^
-    --name AMGLDMExtractor ^
-    ldm_gui_launcher.py
+    --name AMGMessageExtractor ^
+    extractor_gui_launcher.py
 
 set "result=%errorlevel%"
 popd

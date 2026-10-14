@@ -2,7 +2,7 @@ import tkinter as tk
 
 import pytest
 
-from amg.ldm_gui import MessageExtractor
+from amg.extractor_gui import MessageExtractor
 
 LDM_BODY = (
     "\r\n\x01QD HKGTSXH\r\n"
