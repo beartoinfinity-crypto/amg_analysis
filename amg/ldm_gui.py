@@ -122,9 +122,22 @@ def _extract_ldm(text):
 def _extract_mvt(text):
     facts = extractors.extract_movement(text)
     lines = ['=== MVT / MVA extracted facts ===']
+    header = facts.get('flight_header', {})
+    if header:
+        flight = f"{header['carrier']}{header['flight_num']}"
+        if header.get('suffix'):
+            flight += header['suffix']
+        lines.append(f'  Flight: {flight}')
+        if header.get('reg'):
+            lines.append(f'  Reg: {header["reg"]}')
+        if header.get('apt'):
+            lines.append(f'  Apt: {header["apt"]}')
+        if header.get('day'):
+            lines.append(f'  Day: {header["day"]}')
     times = facts.get('times', {})
     time_labels = {
-        'AD': 'AD (actual off-blocks)', 'EO': 'EO (estimated airborne)',
+        'AD': 'AD (actual off-blocks)', 'AB': 'AB (actual airborne)',
+        'EO': 'EO (estimated take-off)',
         'EL': 'EL (estimated landing)', 'EA': 'EA (estimated on-blocks)',
         'AA': 'AA (actual on-blocks)', 'TD': 'TD (actual touchdown)',
         'ED': 'ED (estimated departure)', 'RA': 'RA (revised arrival)',

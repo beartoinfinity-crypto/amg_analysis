@@ -165,7 +165,7 @@ def editable_fields(text, msg_type):
     if msg_type in {'MVT', 'MVA'}:
         for i, match in enumerate(PAX_RE.finditer(text), 1):
             add(match, 'pax', 'count', f'Pax field {i}')
-        for match in re.finditer(r'\b(?:EA|ED|AA|AD|TD|EO)\d{4}(?:/\d{4})?\s+([A-Z]{3})\b', text):
+        for match in re.finditer(r'\b(?:EA|ED|AA|AD|AB|TD|EO)\d{4}(?:/\d{4})?\s+([A-Z]{3})\b', text):
             add(match, 1, 'airport', 'Movement airport')
     return sorted(fields, key=lambda field: field.start)
 

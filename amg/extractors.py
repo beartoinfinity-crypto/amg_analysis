@@ -60,6 +60,11 @@ LDM_HEADER_RE = re.compile(
     r"(?:/(?P<crew_cab_f>\d+))?)?",
     re.ASCII,
 )
+MVT_HEADER_RE = re.compile(
+    r"^(?P<carrier>[A-Z]{2})(?P<flight_num>\d{1,4})(?P<suffix>[A-Z])?/"
+    r"(?P<day>\d{2})\.(?P<reg>[A-Z0-9\-]+)\.(?P<apt>[A-Z]{3})$",
+    re.ASCII,
+)
 LDM_NIL_RE = re.compile(r"^NIL$", re.IGNORECASE)
 LDM_SEG_PAX_RE = re.compile(r"^\d+/\d+/\d+(?:/\d+)?$")
 LDM_DEADLOAD_RE = re.compile(r"^T(\d+)$")
@@ -149,10 +154,11 @@ def _split_time(value):
 
 
 def _times(raw_text):
-    """AHM 780 mapping: an AD pair is AD(off-blocks)+EO(airborne); an EA token
+    """AHM 780 mapping: an AD pair is AD(off-blocks first)/AB(airborne
+    second); a standalone EO token is estimated take-off; an EA token
     maps to EL(estimated landing); an EB token maps to EA(estimated
-    on-blocks); an AA pair is TD(touchdown)+AA(on-blocks); a 6-digit group is
-    DDHHMM so date rides along."""
+    on-blocks); an AA pair is AA(on-blocks first)/TD(touchdown second); a
+    6-digit group is DDHHMM so date rides along."""
     times = {}
     destination = None
     for line in validate_lines(raw_text):
@@ -164,13 +170,13 @@ def _times(raw_text):
             raw_code, first, second = match.group(1), match.group(2), match.group(3)
             code = TIME_CODE_MAP[raw_code]
             if raw_code == "AA" and second:
+                times["AA"] = _split_time(first)
                 if "TD" not in times:
-                    times["TD"] = _split_time(first)
-                times["AA"] = _split_time(second)
+                    times["TD"] = _split_time(second)
                 continue
             times[code] = _split_time(first)
             if second and raw_code == "AD":
-                times["EO"] = _split_time(second)
+                times["AB"] = _split_time(second)
         if destination is None:
             for i in range(len(tokens) - 1):
                 m = TIMES_RE.match(tokens[i])
@@ -183,43 +189,57 @@ def _times(raw_text):
 
 def _delay_slots(raw_text):
     """DL line fills IR1/DL1.., EDL line continues at IR3/DL3.., DLA adds
-    reason codes only at IR5+. Within a line, slash-groups alternate
-    reason-code then duration."""
+    reason codes only at IR5+. Within a DL/EDL line each space-separated
+    token is either a two-group IR/DL pair or a four-group multi-form
+    IR1/IR2/DL1/DL2; empty DLA groups skip an IR slot (so ``93//11/``
+    yields IR5 and IR7)."""
     slots = {}
     base_for = {"DL": 1, "EDL": 3}
     dla_codes = []
     for line in validate_lines(raw_text):
         stripped = line.strip()
         if stripped.startswith("DLA"):
-            dla_codes.extend(p for p in stripped[3:].split("/") if p)
+            dla_codes.extend(p.strip() for p in stripped[3:].split("/"))
             continue
         prefix = "EDL" if stripped.startswith("EDL") else (
             "DL" if stripped.startswith("DL") else None)
         if prefix is None:
             continue
-        ordered = []
-        for token in stripped[len(prefix):].split():
-            parts = [re.sub(r"^DL", "", p) for p in token.split("/") if p]
-            for position, part in enumerate(parts):
-                ordered.append(("DL" if position % 2 else "IR", part))
         ir_next = dl_next = base_for[prefix]
-        for role, value in ordered:
-            if role == "IR":
-                while ir_next <= 8 and f"IR{ir_next}" in slots:
-                    ir_next += 1
-                if ir_next > 8:
-                    continue
-                slots[f"IR{ir_next}"] = value
-                ir_next += 1
+        # Each space-separated token is one IR/DL pair or a multi-group form
+        for token in stripped[len(prefix):].split():
+            groups = [re.sub(r"^DL", "", p).strip() for p in token.split("/") if p]
+            if len(groups) >= 4:
+                # Multi-group: first half IRs, second half DLs
+                mid = len(groups) // 2
+                ordered = [("IR", g) for g in groups[:mid]] + [("DL", g) for g in groups[mid:]]
             else:
-                while dl_next <= 8 and f"DL{dl_next}" in slots:
+                # Two-group form: IR/DL pair
+                ordered = [("IR", groups[0])] if groups else []
+                if len(groups) >= 2:
+                    ordered.append(("DL", groups[1]))
+            for role, value in ordered:
+                if role == "IR":
+                    while ir_next <= 8 and f"IR{ir_next}" in slots:
+                        ir_next += 1
+                    if ir_next > 8:
+                        continue
+                    slots[f"IR{ir_next}"] = value
+                    ir_next += 1
+                else:
+                    while dl_next <= 8 and f"DL{dl_next}" in slots:
+                        dl_next += 1
+                    if dl_next > 8:
+                        continue
+                    slots[f"DL{dl_next}"] = value.zfill(4)
                     dl_next += 1
-                if dl_next > 8:
-                    continue
-                slots[f"DL{dl_next}"] = value.zfill(4)
-                dl_next += 1
-    for offset, code in enumerate(dla_codes[:4]):
-        slots[f"IR{5 + offset}"] = code
+    slot_idx = 5
+    for code in dla_codes:
+        if code:
+            slots[f"IR{slot_idx}"] = code
+        slot_idx += 1
+        if slot_idx > 8:
+            break
     return slots
 
 
@@ -241,11 +261,12 @@ def _si_value(text):
     return text
 
 
-def _absorb_si_tokens(tokens, si, events):
+def _absorb_si_tokens(tokens, si, events, free_text=None):
     i = 0
     matched_any = False
     while i < len(tokens):
         token = tokens[i]
+        claimed = False
         for key, name in SI_VALUE_KEYS.items():
             if token == key and i + 1 < len(tokens):
                 j = i + 1
@@ -254,11 +275,15 @@ def _absorb_si_tokens(tokens, si, events):
                 si[name] = _si_value(tokens[j])
                 i = j
                 matched_any = True
+                claimed = True
                 break
             if token.startswith(key) and len(token) > len(key) and not token.isalpha():
                 si[name] = _si_value(token[len(key):])
                 matched_any = True
+                claimed = True
                 break
+        if not claimed and free_text is not None:
+            free_text.append(token)
         i += 1
     if not matched_any and tokens and EVENT_TIME_RE.match(tokens[-1]):
         label = " ".join(tokens[:-1])
@@ -268,6 +293,7 @@ def _absorb_si_tokens(tokens, si, events):
 
 def _si_section(raw_text):
     si, events = {}, []
+    free_text = []
     collecting = False
     for line in validate_lines(raw_text):
         stripped = line.strip()
@@ -275,7 +301,7 @@ def _si_section(raw_text):
             collecting = True
             rest = stripped[2:].strip()
             if rest:
-                _absorb_si_tokens(rest.split(), si, events)
+                _absorb_si_tokens(rest.split(), si, events, free_text)
             continue
         if not stripped:
             collecting = False
@@ -284,10 +310,34 @@ def _si_section(raw_text):
             if stripped.startswith("\x03") or stripped.startswith("END"):
                 collecting = False
                 continue
-            _absorb_si_tokens(stripped.split(), si, events)
+            _absorb_si_tokens(stripped.split(), si, events, free_text)
     if events:
         si["events"] = events
+    if free_text and not events:
+        # Only store free text when it is not an event-label + time pair
+        si["text"] = " ".join(free_text)
     return si
+
+
+def _mvt_header(raw_text):
+    """MVT/MVA flight header: ``BA123/16.AB1234.HKG`` (spec v3 §2.2)."""
+    for line in validate_lines(raw_text):
+        stripped = line.strip()
+        match = MVT_HEADER_RE.match(stripped)
+        if not match:
+            continue
+        g = match.groupdict()
+        header = {
+            "carrier": g["carrier"],
+            "flight_num": g["flight_num"],
+            "day": int(g["day"]),
+            "reg": g["reg"],
+            "apt": g["apt"],
+        }
+        if g["suffix"]:
+            header["suffix"] = g["suffix"]
+        return header
+    return {}
 
 
 def extract_movement(raw_text):
@@ -298,6 +348,10 @@ def extract_movement(raw_text):
         "adp": "ADP" in tokens_set,
         "abp": "ABP" in tokens_set,
     }
+    header = _mvt_header(raw_text)
+    if header:
+        facts["flight_header"] = header
+        facts["AMG_REG"] = header["reg"]
     if destination:
         facts["destination"] = destination
     si = _si_section(raw_text)

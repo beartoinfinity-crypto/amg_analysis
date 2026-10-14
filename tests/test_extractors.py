@@ -36,11 +36,11 @@ def test_movement_extracts_actual_and_estimated_times(tmp_path, make_archive):
     import json
     facts = json.loads(fact["facts_json"])
     assert facts["times"]["AD"] == {"time": "1654", "date": None}
-    assert facts["times"]["EO"] == {"time": "1712", "date": None}
+    assert facts["times"]["AB"] == {"time": "1712", "date": None}
     assert facts["times"]["EL"] == {"time": "1834", "date": None}
     assert facts["times"]["TD"] == {"time": "1708", "date": None}
-    # explicit TD token wins; AA pair degrades to its on-blocks time
-    assert facts["times"]["AA"] == {"time": "1734", "date": None}
+    # explicit TD token wins; AA pair first value is on-blocks (AA)
+    assert facts["times"]["AA"] == {"time": "1721", "date": None}
 
 
 def test_movement_extracts_delay_codes_and_durations(tmp_path, make_archive):
@@ -1248,7 +1248,7 @@ def test_ahm780_departure_message_maps_ad_eo_el_and_destination(tmp_path, make_a
         con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
     )
     assert facts["times"]["AD"] == {"time": "1939", "date": None}
-    assert facts["times"]["EO"] == {"time": "2009", "date": None}
+    assert facts["times"]["AB"] == {"time": "2009", "date": None}
     assert facts["times"]["EL"] == {"time": "2122", "date": None}
     assert facts["destination"] == "TPE"
 
@@ -1287,7 +1287,7 @@ def test_ahm780_six_digit_times_carry_date_component(tmp_path, make_archive):
         con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
     )
     assert facts["times"]["AD"] == {"time": "0110", "date": "07"}
-    assert facts["times"]["EO"] == {"time": "0132", "date": "07"}
+    assert facts["times"]["AB"] == {"time": "0132", "date": "07"}
     assert facts["times"]["EL"] == {"time": "0527", "date": "07"}
     assert facts["destination"] == "HKG"
 
@@ -1312,7 +1312,7 @@ def test_ahm780_edl_and_dla_delay_lines_fill_secondary_slots(tmp_path, make_arch
     delays = facts["delays"]
     assert delays["IR1"] == "57" and delays["DL1"] == "0015"
     assert delays["IR3"] == "12" and delays["DL3"] == "0030"
-    assert delays["IR5"] == "93" and delays["IR6"] == "95"
+    assert delays["IR5"] == "93" and delays["IR7"] == "95"
 
 
 def test_ahm780_px_line_extracts_transit_local_and_total(tmp_path, make_archive):
@@ -1414,6 +1414,100 @@ def test_ahm780_si_spaced_value_form(tmp_path, make_archive):
         con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
     )
     assert facts["si"]["fuel_remaining"] == 50500
+
+
+def test_tc_mvt01_header_and_multi_group_delay(tmp_path, make_archive):
+    """TC-MVT-01: header block + DL line with IR1/IR2/DL1/DL2 mapping."""
+    body = (
+        "\r\nQD HKGTSXH\r\n"
+        ".HKGRCCI 082010\r\n"
+        "\x02MVT\r\n"
+        "BA123/16.AB1234.HKG\r\n"
+        "AD0917/0932 EA1635 BKK\r\n"
+        "DL 41/81/0028/0032 PX102\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["times"]["AD"]["time"] == "0917" and facts["times"]["AB"]["time"] == "0932"
+    delays = facts["delays"]
+    assert delays["IR1"] == "41" and delays["IR2"] == "81"
+    assert delays["DL1"] == "0028" and delays["DL2"] == "0032"
+    assert facts["pax"]["total"] == 102
+    header = facts["flight_header"]
+    assert header["carrier"] == "BA" and header["flight_num"] == "123"
+    assert header["reg"] == "AB1234" and header["day"] == 16 and header["apt"] == "HKG"
+
+
+def test_tc_mvt02_hyphenated_reg_and_si(tmp_path, make_archive):
+    """TC-MVT-02: hyphenated reg preserved, SI text captured."""
+    body = (
+        "\r\nQD HKGTSXH\r\n"
+        ".HKGRCCI 082010\r\n"
+        "\x02MVT\r\n"
+        "GF165/16.A6-EAB.HKG\r\n"
+        "AA1700/1650\r\n"
+        "SI REVISED\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["times"]["AA"]["time"] == "1700" and facts["times"]["TD"]["time"] == "1650"
+    assert facts["AMG_REG"] == "A6-EAB"
+    assert facts["si"]["text"] == "REVISED"
+
+
+def test_tc_mvt03_px_split_total(tmp_path, make_archive):
+    """TC-MVT-03: PX210/15 splits into total 225, transit 15."""
+    body = (
+        "\r\nQD HKGTSXH\r\n"
+        ".HKGRCCI 082010\r\n"
+        "\x02MVT\r\n"
+        "CX848/16.B-KPF.JFK\r\n"
+        "AD2200/2215 EA0500 HKG\r\n"
+        "PX210/15\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    assert facts["times"]["AD"]["time"] == "2200" and facts["times"]["AB"]["time"] == "2215" and facts["times"]["EL"]["time"] == "0500"
+    assert facts["pax"] == {"transit": 210, "disembarking": 15, "total": 225}
+    assert facts["AMG_REG"] == "B-KPF"
+
+
+def test_tc_mvt04_multi_group_and_dla(tmp_path, make_archive):
+    """TC-MVT-04: DL+EDL multi-group + DLA IR5/IR7 with empty slot skip."""
+    body = (
+        "\r\nQD HKGTSXH\r\n"
+        ".HKGRCCI 082010\r\n"
+        "\x02MVT\r\n"
+        "BA216/13.AB1234.HKG\r\n"
+        "AD1320/1325\r\n"
+        "DL 57/12/0015/0015\r\n"
+        "EDL 11/73/0005/0005\r\n"
+        "DLA 93//11/\r\n"
+        "\x03\r\n"
+    )
+    con = ingest_text(tmp_path, make_archive, body)
+    import json
+    facts = json.loads(
+        con.execute("SELECT facts_json FROM message_facts").fetchone()["facts_json"]
+    )
+    delays = facts["delays"]
+    assert delays["IR1"] == "57" and delays["IR2"] == "12"
+    assert delays["DL1"] == "0015" and delays["DL2"] == "0015"
+    assert delays["IR3"] == "11" and delays["IR4"] == "73"
+    assert delays["DL3"] == "0005" and delays["DL4"] == "0005"
+    assert delays["IR5"] == "93" and delays["IR7"] == "11"
 
 
 def test_unhandled_types_store_no_fact_row(tmp_path, make_archive):

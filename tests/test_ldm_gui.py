@@ -122,10 +122,10 @@ def test_mvt_tab_extracts_times_and_pax(app):
     app.mvt_tab.extract()
     output = app.mvt_tab.results.get('1.0', 'end-1c')
     assert 'AD (actual off-blocks): 1654' in output
-    assert 'EO (estimated airborne): 1712' in output
+    assert 'AB (actual airborne): 1712' in output
     assert 'EL (estimated landing): 1834' in output
     assert 'TD (actual touchdown): 1708' in output
-    assert 'AA (actual on-blocks): 1734' in output
+    assert 'AA (actual on-blocks): 1721' in output
     assert 'Destination: HKG' in output
     assert 'total=142' in output
 
