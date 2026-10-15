@@ -20,6 +20,19 @@ ARCHIVE_DATE = re.compile(r"_(\d{4})(\d{2})(\d{2})_\d{4}\.tar\.Z$")
 
 
 def normalize_flight_date(flight_date, archive_name):
+    """Resolve a flight date to ``YYYYMMDD`` using archive context.
+
+    Day-only dates are resolved against the archive filename date with a
+    2-day forward window (month rollover). ``DDMMMYY`` dates use the archive
+    year, falling back one year if more than 183 days in the past.
+
+    Args:
+        flight_date: Flight date string from the message.
+        archive_name: Archive filename used for year/month context.
+
+    Returns:
+        str or None: ``YYYYMMDD`` date string or ``None`` if unresolvable.
+    """
     if not flight_date:
         return None
     day_only = re.fullmatch(r"(\d{1,2})", flight_date)
@@ -457,6 +470,15 @@ GROUP BY m.id;
 
 
 def build_schema():
+    """Build the full database schema: base tables + all view SQL.
+
+    Concatenates the ``SCHEMA`` string (tables, indexes, triggers) with
+    every ``_xxx_view_sql()`` builder, producing a single SQL script
+    suitable for ``executescript``.
+
+    Returns:
+        str: Complete SQL script for tables and views.
+    """
     return (SCHEMA
             + _remap_view_sql()
             + _pnl_view_sql()
@@ -689,6 +711,15 @@ GLUED_KEYWORD_LINE = re.compile(
 
 
 def parse_received_at(stem):
+    """Parse an archive filename stem into an ISO timestamp.
+
+    Handles two stem formats:
+    - 12-char ``%y%m%d%H%M%S`` (2-digit year) with optional 3-digit ms suffix.
+    - 14-char ``%Y%m%d%H%M%S`` (4-digit year) with 1-digit ms suffix.
+
+    Returns:
+        str or None: ISO timestamp with milliseconds, or ``None`` if unparseable.
+    """
     try:
         dt = datetime.strptime(stem[:12], "%y%m%d%H%M%S")
         if len(stem) == 15:
@@ -703,6 +734,10 @@ def parse_received_at(stem):
 
 
 def status_for(suffix):
+    """Map an archive filename suffix to a message status.
+
+    ``.cor`` → ``"corrupted"``; all other suffixes → ``"processed"``.
+    """
     if suffix.lower() == ".cor":
         return "corrupted"
     return "processed"
@@ -712,6 +747,11 @@ CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f]")
 
 
 def _match_flight_dot(line):
+    """Match a flight-dot line (MVT/MVA style) and extract fields.
+
+    Returns:
+        dict or None: Flight number, date, aircraft reg, airport; or ``None`` if no match.
+    """
     match = FLIGHT_LINE.match(line)
     if not match:
         return None
@@ -724,6 +764,11 @@ def _match_flight_dot(line):
 
 
 def _match_pnl_style(line):
+    """Match a PNL-style line and extract carrier, flight number, suffix, and date.
+
+    Returns:
+        dict or None: Carrier, flight_number, suffix, flight_date; or ``None`` if no match.
+    """
     match = PNL_LINE.match(line)
     if not match:
         return None
@@ -736,6 +781,11 @@ def _match_pnl_style(line):
 
 
 def _match_fwd(line):
+    """Match an FWD line and extract flight and destination.
+
+    Returns:
+        dict or None: Flight and destination; or ``None`` if no match.
+    """
     match = FWD_LINE.match(line)
     if not match:
         return None
@@ -747,6 +797,11 @@ def _match_fwd(line):
 
 
 def _match_ldm_new(line):
+    """Match an LDM-new line and extract flight, aircraft reg, and date.
+
+    Returns:
+        dict or None: Flight, aircraft_reg, flight_date; or ``None`` if no match.
+    """
     match = LDM_NEW_LINE.match(line)
     if not match:
         return None
@@ -759,6 +814,11 @@ def _match_ldm_new(line):
 
 
 def _match_asm(line):
+    """Match an ASM line and extract airline prefix and flight info.
+
+    Returns:
+        dict or None: airline and info_line; or ``None`` if no match.
+    """
     match = ASM_LINE.match(line)
     if not match:
         return None
@@ -777,6 +837,20 @@ DEFAULT_PARSERS = (_match_flight_dot, _match_pnl_style)
 
 
 def parse_envelope(raw_text):
+    """Parse the message envelope: priority, destination, msg_type, origin, flight.
+
+    Strips control characters per line, extracts the header priority/destination,
+    determines msg_type from the keyword line (KEYWORD_LINE / GLUED_KEYWORD_LINE),
+    origin from the station-dot line, and flight/aircraft/part fields via the
+    category-specific line matchers.
+
+    Args:
+        raw_text: Raw message text.
+
+    Returns:
+        dict: Envelope fields including priority, destination, msg_type,
+            origin, flight_number, flight_date, aircraft_reg, and others.
+    """
     lines = [CONTROL_CHARS.sub("", line) for line in raw_text.splitlines()]
     priority = destination = origin = None
     header = next((line for line in lines if line.strip()), "")
@@ -833,6 +907,19 @@ def parse_envelope(raw_text):
 
 
 def ingest_archive(archive_path, con):
+    """Extract and parse a single tar archive into the database.
+
+    Runs ``tar -cf - @<path>``, decodes as latin-1, parses each member
+    via ``parse_envelope`` + ``extractors.extract_message``, redacts
+    passenger data, and inserts message/fact/segment rows.
+
+    Args:
+        archive_path: Pathlib path to the tar archive.
+        con: Open SQLite connection.
+
+    Returns:
+        tuple: ``(rows, fact_rows, segment_rows)`` lists of insert tuples.
+    """
     result = subprocess.run(
         ["tar", "-cf", "-", f"@{archive_path.as_posix()}"],
         capture_output=True,
@@ -989,6 +1076,21 @@ def refresh_message_cache(con, flights=None):
 
 
 def ingest_archives(archive_paths, db_path, progress=None, should_stop=None):
+    """Ingest multiple tar archives into the database.
+
+    Skips archives already ingested (name+size match). Commits per archive,
+    rolls back on failure. Rebuilds the FTS index and refreshes
+    ``pnl_bursts`` / ``pnl_remaps`` if any new data was ingested.
+
+    Args:
+        archive_paths: List of pathlib paths to tar archives.
+        db_path: Path to the SQLite database file.
+        progress: Optional callback ``(done, total, ingested, skipped, failed)``.
+        should_stop: Optional callable returning True to cancel ingestion.
+
+    Returns:
+        tuple: ``(ingested, skipped, failed)`` counts.
+    """
     _probe_writable(db_path)
     con = sqlite3.connect(db_path)
     con.executescript(build_schema())
@@ -1061,6 +1163,18 @@ def _migrate(con):
 
 
 def _probe_writable(db_path):
+    """Probe that the database is writable before ingesting.
+
+    Opens a connection with a 5-second timeout and attempts a
+    ``BEGIN IMMEDIATE`` transaction. Raises ``RuntimeError`` if the
+    database is locked by another process.
+
+    Args:
+        db_path: Path to the SQLite database file.
+
+    Raises:
+        RuntimeError: If the database is locked.
+    """
     try:
         con = sqlite3.connect(db_path, timeout=5.0)
         con.execute("BEGIN IMMEDIATE")
@@ -1074,6 +1188,20 @@ def _probe_writable(db_path):
 
 
 def rebuild_archives(archive_paths, db_path, progress=None, should_stop=None):
+    """Rebuild the database from scratch by re-ingesting all archives.
+
+    Probes writability, deletes all tables, runs VACUUM, then re-ingests
+    every archive. Returns ``(ingested, skipped, failed)``.
+
+    Args:
+        archive_paths: List of pathlib paths to tar archives.
+        db_path: Path to the SQLite database file.
+        progress: Optional callback ``(done, total, ingested, skipped, failed)``.
+        should_stop: Optional callable returning True to cancel.
+
+    Returns:
+        tuple: ``(ingested, skipped, failed)`` counts.
+    """
     _probe_writable(db_path)
     con = sqlite3.connect(db_path)
     con.executescript(build_schema())
@@ -1097,6 +1225,18 @@ def rebuild_archives(archive_paths, db_path, progress=None, should_stop=None):
 
 
 def cmd_ingest(args):
+    """CLI handler for the ``ingest`` subcommand.
+
+    Globs ``*.tar.Z`` from ``args.archive_dir``, optionally filters with
+    ``--only``, and ingests via ``ingest_archives``. Returns exit code
+    0 (success), 1 (all failed), or 3 (partial failure).
+
+    Args:
+        args: argparse.Namespace with ``archive_dir``, ``db``, and ``only``.
+
+    Returns:
+        int: Exit code.
+    """
     paths = sorted(Path(args.archive_dir).glob("*.tar.Z"))
     if args.only:
         wanted = set(args.only)
@@ -1118,6 +1258,19 @@ def cmd_ingest(args):
 
 
 def scan_archives(archive_dir, db_path):
+    """Scan a directory for archives and classify each as indexed or pending.
+
+    Compares archive name+size against the ``archives`` table to determine
+    ingest state.
+
+    Args:
+        archive_dir: Directory containing ``*.tar.Z`` archives.
+        db_path: Path to the SQLite database file.
+
+    Returns:
+        list: Dicts with ``name``, ``size_bytes``, and ``state``
+            (``"indexed"`` or ``"pending"``).
+    """
     indexed = {}
     if Path(db_path).exists():
         con = sqlite3.connect(db_path)
@@ -1137,6 +1290,16 @@ def scan_archives(archive_dir, db_path):
 
 
 def cmd_status(args):
+    """CLI handler for the ``status`` subcommand.
+
+    Prints each archive in ``archive_dir`` as ``indexed`` or ``pending``.
+
+    Args:
+        args: argparse.Namespace with ``db`` and ``archive_dir``.
+
+    Returns:
+        int: Always 0.
+    """
     con = sqlite3.connect(args.db)
     indexed = {name for (name,) in con.execute("SELECT name FROM archives")}
     con.close()
@@ -1147,6 +1310,19 @@ def cmd_status(args):
 
 
 def cmd_search(args):
+    """CLI handler for the ``search`` subcommand.
+
+    Builds a WHERE clause from optional filters (type, flight, origin,
+    dest, status, from/to dates, FTS query). Outputs plain text or CSV.
+
+    Args:
+        args: argparse.Namespace with ``db``, ``q``, ``type``, ``flight``,
+            ``origin``, ``dest``, ``status``, ``from_date``, ``to_date``,
+            and ``csv``.
+
+    Returns:
+        int: Always 0.
+    """
     con = sqlite3.connect(args.db)
     where, params = [], []
     joins = ""
@@ -1210,6 +1386,17 @@ def cmd_search(args):
 
 
 def cmd_show(args):
+    """CLI handler for the ``show`` subcommand.
+
+    Prints the raw text of a message by ID. With ``--plain``, prints the
+    stored un-redacted plaintext instead of the redacted text.
+
+    Args:
+        args: argparse.Namespace with ``db``, ``message_id``, and ``plain``.
+
+    Returns:
+        int: 0 on success, 1 if message not found.
+    """
     con = sqlite3.connect(args.db)
     column = "raw_text_plain" if getattr(args, "plain", False) else "raw_text"
     row = con.execute(
@@ -1235,6 +1422,17 @@ STATS_BUCKET = {
 
 
 def cmd_stats(args):
+    """CLI handler for the ``stats`` subcommand.
+
+    Aggregates message counts by day, hour, type, or airline. Day/hour
+    buckets also split by status (processed/corrupted).
+
+    Args:
+        args: argparse.Namespace with ``db``, ``by``, and ``csv``.
+
+    Returns:
+        int: Always 0.
+    """
     con = sqlite3.connect(args.db)
     bucket = STATS_BUCKET[args.by]
     split_status = args.by in ("day", "hour")
@@ -1264,12 +1462,33 @@ def cmd_stats(args):
 
 
 def cmd_gui(args):
+    """CLI handler for the ``gui`` subcommand.
+
+    Launches the Tkinter GUI for interactive archive ingestion.
+
+    Args:
+        args: argparse.Namespace with ``archive_dir`` and ``db``.
+
+    Returns:
+        int: Exit code from the GUI.
+    """
     from amg.gui import run_gui
 
     return run_gui(Path(args.archive_dir), Path(args.db))
 
 
 def main(argv=None):
+    """CLI entry point: parse arguments and dispatch to subcommand handlers.
+
+    Supports subcommands: ``ingest``, ``search``, ``show``, ``stats``,
+    ``status``, ``gui``.
+
+    Args:
+        argv: Optional argument list (defaults to ``sys.argv[1:]``).
+
+    Returns:
+        int: Exit code from the dispatched handler.
+    """
     parser = argparse.ArgumentParser(prog="amg")
     sub = parser.add_subparsers(dest="command", required=True)
 

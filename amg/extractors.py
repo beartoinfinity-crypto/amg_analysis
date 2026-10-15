@@ -128,6 +128,18 @@ class MalformedMessage(ValueError):
 
 
 def validate_lines(raw_text, strict=STRICT_LINE_VALIDATION):
+    """Split ``raw_text`` into lines, validating line length if ``strict``.
+
+    Normalizes CRLF to LF, splits on newline. In strict mode, any line
+    exceeding ``LINE_LIMIT`` characters raises ``MalformedMessage``.
+
+    Args:
+        raw_text: Raw message text.
+        strict: If True, raise on over-length lines; else silently accept.
+
+    Returns:
+        list[str]: Normalized lines.
+    """
     lines = raw_text.replace("\r\n", "\n").split("\n")
     if strict:
         for line in lines:
@@ -137,6 +149,13 @@ def validate_lines(raw_text, strict=STRICT_LINE_VALIDATION):
 
 
 def count_line_violations(raw_text):
+    """Count lines in ``raw_text`` that exceed ``LINE_LIMIT`` characters.
+
+    Non-strict; used to surface data-quality issues without aborting.
+
+    Returns:
+        int: Number of over-length lines.
+    """
     return sum(1 for line in validate_lines(raw_text) if len(line) > LINE_LIMIT)
 
 
@@ -148,6 +167,17 @@ TIME_CODE_MAP = {
 
 
 def _split_time(value):
+    """Split a 6-char ``DDHHMM`` time value or pass a shorter one through.
+
+    If ``value`` is 6 chars, returns ``{"time": value[2:], "date": value[:2]}``;
+    otherwise returns ``{"time": value, "date": None}``.
+
+    Args:
+        value: Time token from a times line.
+
+    Returns:
+        dict: Keys ``time`` and ``date``.
+    """
     if len(value) == 6:
         return {"time": value[2:], "date": value[:2]}
     return {"time": value, "date": None}
@@ -252,6 +282,18 @@ SI_MARKER_RE = re.compile(r"^SI\b")
 
 
 def _si_value(text):
+    """Coerce a SI-section token to int, float, or keep as str.
+
+    Pure-integer tokens are returned as ``int`` unless they have a
+    leading zero (preserving format). Decimal tokens become ``float``;
+    anything else is returned unchanged as ``str``.
+
+    Args:
+        text: Token text from an SI section.
+
+    Returns:
+        int | float | str: Coerced value.
+    """
     if re.fullmatch(r"\d+", text):
         if len(text) > 1 and text.startswith("0"):
             return text
@@ -262,6 +304,22 @@ def _si_value(text):
 
 
 def _absorb_si_tokens(tokens, si, events, free_text=None):
+    """Parse SI-section tokens into structured ``si``/``events`` dicts.
+
+    Walks a token list, matching known SI keys (FR/EET/BO/TOF/PL/ZFW etc.)
+    and event-time patterns, populating ``si`` and appending ``(key, time)``
+    tuples to ``events``. Unrecognized tokens accumulate in ``free_text``
+    when provided. Returns True if any known key was matched.
+
+    Args:
+        tokens: Space-split tokens from an SI line.
+        si: Mutable dict of SI values, updated in place.
+        events: Mutable list of event tuples, appended to in place.
+        free_text: Optional list collecting unmatched tokens.
+
+    Returns:
+        bool: True if at least one known SI key was recognized.
+    """
     i = 0
     matched_any = False
     while i < len(tokens):
@@ -292,6 +350,21 @@ def _absorb_si_tokens(tokens, si, events, free_text=None):
 
 
 def _si_section(raw_text):
+    """Parse the SI (supplementary information) section of a message.
+
+    Scans lines for an ``SI`` marker, then accumulates tokens via
+    ``_absorb_si_tokens`` until a blank line, ``ETX``, or ``END`` ends
+    the section. Events and free text are folded back into the returned
+    dict.
+
+    Args:
+        raw_text: Raw message text.
+
+    Returns:
+        dict: SI name/value pairs. Includes an ``events`` key (list of
+        event dicts) when events were found, and a ``text`` key (joined
+        free-text tokens) when free text exists without events.
+    """
     si, events = {}, []
     free_text = []
     collecting = False
@@ -341,6 +414,18 @@ def _mvt_header(raw_text):
 
 
 def extract_movement(raw_text):
+    """Extract movement (MVT/MVA) facts from a raw message.
+
+    Parses flight header, times, ADP/ABP flags, SI section, delay
+    slots, and destination from the message text. Returns a dict of
+    facts suitable for the ``facts`` JSON column.
+
+    Args:
+        raw_text: Raw message text.
+
+    Returns:
+        dict: Movement facts including times, header, SI, delay slots.
+    """
     tokens_set = set(raw_text.replace("\r\n", " ").split())
     times, destination = _times(raw_text)
     facts = {
@@ -380,6 +465,17 @@ def extract_movement(raw_text):
 
 
 def extract_diversion(raw_text):
+    """Extract diversion (DVA) facts from a raw message.
+
+    Parses CAN flag, POB (persons on board), ETA, and DVA code.
+    Returns a dict of diversion facts.
+
+    Args:
+        raw_text: Raw message text.
+
+    Returns:
+        dict: Diversion facts including can, pob, eta, dva.
+    """
     facts = {"can": bool(CAN_RE.search(raw_text))}
     pob = POB_RE.search(raw_text)
     if pob:
@@ -392,6 +488,17 @@ def extract_diversion(raw_text):
 
 
 def _split_pax_classes(values):
+    """Split a slash-delimited passenger class string into a dict.
+
+    Accepts ``"F/J/Y"`` (first/business/economy) or ``"J/Y"``
+    (business/economy, first defaults to 0).
+
+    Args:
+        values: Slash-delimited class counts.
+
+    Returns:
+        dict: Keys ``first``, ``business``, ``economy``.
+    """
     nums = [int(v) for v in values.split("/")]
     if len(nums) == 3:
         return {"first": nums[0], "business": nums[1], "economy": nums[2]}
@@ -399,6 +506,7 @@ def _split_pax_classes(values):
 
 
 def _ldm_class_totals(segment):
+    """Return first/business/economy totals for an LDM segment, defaulting to 0."""
     classes = segment.get("classes", {})
     return {"first": classes.get("first", 0),
             "business": classes.get("business", 0),
@@ -406,6 +514,16 @@ def _ldm_class_totals(segment):
 
 
 def _parse_ldm_segment_tokens(tokens, segment):
+    """Parse LDM segment tokens into a segment dict.
+
+    Recognizes NIL, deadload, pax-class, pad-class, segment-total,
+    and compartment/category tokens, populating ``segment`` in place.
+    Unrecognized tokens are collected under ``segment['extra']``.
+
+    Args:
+        tokens: Space-split tokens from one LDM segment.
+        segment: Mutable dict updated in place.
+    """
     for token in tokens:
         if not token:
             continue
@@ -449,6 +567,18 @@ def _parse_ldm_segment_tokens(tokens, segment):
 
 
 def _parse_ldm_segments(raw_text):
+    """Parse all LDM segments from a raw message.
+
+    Identifies segment lines starting with ``-XXX`` (three-letter
+    destination) and continuation lines starting with ``.``, parsing
+    each via ``_parse_ldm_segment_tokens``.
+
+    Args:
+        raw_text: Raw message text.
+
+    Returns:
+        list[dict]: Parsed segment dicts.
+    """
     segments, current = [], None
     for line in validate_lines(raw_text):
         stripped = line.strip()
@@ -475,6 +605,18 @@ def _parse_ldm_segments(raw_text):
 
 
 def _ldm_header(raw_text):
+    """Parse the LDM message header.
+
+    Extracts carrier, flight number, day of month, aircraft registration,
+    departure/arrival airports, and crew cabin/checkpoint counts from
+    the header line.
+
+    Args:
+        raw_text: Raw message text.
+
+    Returns:
+        dict: Header facts or empty dict if no header matched.
+    """
     for line in validate_lines(raw_text):
         stripped = line.strip()
         match = LDM_HEADER_RE.match(stripped)
@@ -509,6 +651,19 @@ def _ldm_header(raw_text):
 
 
 def _ldm_si(raw_text):
+    """Parse the SI (supplementary information) section of an LDM message.
+
+    Collects SI lines until a blank line, ``ETX``, or ``END``. Also
+    parses a station breakdown line (FRE/POS/BAG/TRA) when present.
+    Collapses whitespace runs in the returned SI text.
+
+    Args:
+        raw_text: Raw message text.
+
+    Returns:
+        tuple: ``(si_text, breakdown)`` where ``si_text`` is the
+        collapsed SI text and ``breakdown`` is a dict or None.
+    """
     si_lines, collecting = [], False
     breakdown = None
     for line in validate_lines(raw_text):
@@ -546,6 +701,19 @@ def _ldm_si(raw_text):
 
 
 def extract_load(raw_text):
+    """Extract load (LDM) facts and segments from a raw message.
+
+    Parses header (reg, cabins, crew, type), segments, SI section,
+    station breakdown, basic weight, and balance index. Also computes
+    flattened local/transit totals via ``_aggregate_load``.
+
+    Args:
+        raw_text: Raw message text.
+
+    Returns:
+        tuple: ``(facts, segments)`` where ``facts`` is a dict of
+        load facts and ``segments`` is a list of segment dicts.
+    """
     facts, segments = {}, []
     header = _ldm_header(raw_text)
     if header.get("reg"):
@@ -592,6 +760,20 @@ def extract_load(raw_text):
 
 
 def _aggregate_load(segments, current_station="HKG"):
+    """Aggregate LDM segments into local/transit passenger and deadload totals.
+
+    Given a list of parsed LDM segments and the current station, computes
+    local boarding pax (px7), transit pax (px6), total pax, cabin class
+    totals (px1/px2/px3), and deadload (ddl). Segments beyond the current
+    station on the route are transit; NIL segments are excluded.
+
+    Args:
+        segments: List of parsed LDM segment dicts.
+        current_station: IATA code of the current station (default HKG).
+
+    Returns:
+        dict: Aggregated totals or empty dict if no matching segment.
+    """
     if not segments:
         return {}
     route = []
@@ -640,6 +822,18 @@ def _aggregate_load(segments, current_station="HKG"):
 
 
 def _ptm_row(line):
+    """Parse a single PTM (passenger transfer) row.
+
+    Matches the PTM line pattern, extracting flight, day, airports,
+    and cabin/bag detail tokens. Returns None if the line does not
+    match.
+
+    Args:
+        line: One line of PTM data.
+
+    Returns:
+        dict | None: Parsed row or None.
+    """
     match = PTM_ROW_RE.match(line.strip())
     if not match:
         return None
@@ -667,6 +861,18 @@ def _ptm_row(line):
 
 
 def extract_transfer(raw_text):
+    """Extract PTM (passenger transfer) facts and segments.
+
+    Parses total transfers, total baggage, and per-segment rows.
+    Falls back to summing segment seats/bags when totals are absent.
+
+    Args:
+        raw_text: Raw message text.
+
+    Returns:
+        tuple: ``(facts, segments)`` where ``facts`` is a dict of
+        transfer totals and ``segments`` is a list of row dicts.
+    """
     facts, segments = {}, []
     px = PX_RE.search(raw_text)
     if px:
@@ -690,6 +896,17 @@ def extract_transfer(raw_text):
 
 
 def _assistance_facts(raw_text):
+    """Extract assistance (SSR/assist) facts from a raw message.
+
+    Parses assist codes, ADD/DEL/CHG delta counts, and pax_total.
+    Returns a dict of assistance facts.
+
+    Args:
+        raw_text: Raw message text.
+
+    Returns:
+        dict: Assistance facts including assist_codes, delta, pax_total.
+    """
     codes = sorted(set(code.upper() for code in ASSIST_CODE_RE.findall(raw_text)))
     delta = {op: 0 for op in ("ADD", "DEL", "CHG")}
     current = None
@@ -710,6 +927,7 @@ def _assistance_facts(raw_text):
 
 
 def extract_assistance(raw_text):
+    """Extract assistance (SSR/assist) facts. Delegates to ``_assistance_facts``."""
     return _assistance_facts(raw_text)
 
 
@@ -829,6 +1047,19 @@ def _aggregate_pnl(segments, boarding):
 
 
 def extract_forward(raw_text):
+    """Extract FWD (forwarded traffic) facts and segments from a raw message.
+
+    Parses crew, destination blocks with component counts, nationalities,
+    and passenger rows. Returns ``(facts, segments)`` where ``facts``
+    aggregates destinations, hops, and nationalities, and ``segments``
+    is the list of parsed passenger rows.
+
+    Args:
+        raw_text: Raw message text.
+
+    Returns:
+        tuple: ``(facts, segments)``.
+    """
     facts, segments = {}, []
     for line in validate_lines(raw_text):
         header = FWD_CREW_RE.match(line.strip())
@@ -908,11 +1139,30 @@ FULL_REDACT_TYPES = {"PNL", "ADL"}
 
 
 def _redact_lines(raw_text):
+    """Split raw text into lines, detecting the newline convention.
+
+    Returns ``(lines, newline)`` where ``newline`` is the original
+    line-ending string used to rejoin the lines later.
+    """
     newline = "\r\n" if "\r\n" in raw_text else "\n"
     return raw_text.split(newline), newline
 
 
 def redact_text(msg_type, raw_text):
+    """Redact passenger names and identifiers per the privacy policy.
+
+    Full redaction for PNL/ADL (name and identifier rows → ``[REDACTED]``).
+    Partial redaction for PTM/PSM/PAL/CAL (passenger name token and PNR
+    locator redacted, other fields preserved). Returns ``None`` for
+    message types with no redaction requirement.
+
+    Args:
+        msg_type: Message type code.
+        raw_text: Raw message text.
+
+    Returns:
+        str or None: Redacted text, or ``None`` if no redaction applies.
+    """
     if msg_type in FULL_REDACT_TYPES:
         lines, newline = _redact_lines(raw_text)
         out = []
@@ -945,6 +1195,19 @@ def redact_text(msg_type, raw_text):
 
 
 def apply_column_mappings(facts, mappings=None):
+    """Apply interface column-name mappings to a facts dict.
+
+    Remaps fact keys via ``INTERFACE_COLUMN_MAPPINGS`` (uppercased lookup);
+    keys mapped to ``None`` are dropped. Non-LOAD families are unaffected
+    because mappings only contain LOAD-specific keys.
+
+    Args:
+        facts: Facts dict to remap.
+        mappings: Optional mapping override (defaults to module constant).
+
+    Returns:
+        dict: Remapped facts.
+    """
     mappings = mappings if mappings is not None else INTERFACE_COLUMN_MAPPINGS
     remapped = {}
     for key, value in facts.items():
@@ -956,6 +1219,21 @@ def apply_column_mappings(facts, mappings=None):
 
 
 def extract_message(msg_type, raw_text):
+    """Dispatch to the correct family extractor and return a result dict.
+
+    For ASM, checks the airline prefix against ``ASM_AIRLINES_TO_PROCESS``;
+    non-target airlines return a muted result. LOAD-family facts are passed
+    through ``apply_column_mappings`` for data segregation. All other
+    families delegate to ``EXTRACTORS[msg_type]``.
+
+    Args:
+        msg_type: Message type code (e.g. ``"MVT"``, ``"LDM"``).
+        raw_text: Raw message text.
+
+    Returns:
+        dict or None: ``{"family", "facts", "segments"}`` or ``None``
+            if ``msg_type`` is not a known family.
+    """
     family = FAMILIES.get(msg_type)
     if family is None:
         return None
@@ -989,6 +1267,17 @@ def extract_message(msg_type, raw_text):
 
 
 def _asm_airline(raw_text):
+    """Extract the airline prefix from an ASM message.
+
+    Scans lines for a flight-info pattern (``XXXnnn/``) and returns
+    the leading alphabetic prefix. Returns ``None`` if not found.
+
+    Args:
+        raw_text: Raw message text.
+
+    Returns:
+        str or None: Airline prefix (e.g. ``"CX"``) or ``None``.
+    """
     for line in validate_lines(raw_text):
         match = re.match(r"^[A-Z0-9]{2,3}\d+[A-Z]?/", line.strip())
         if match:
@@ -999,4 +1288,5 @@ def _asm_airline(raw_text):
 
 
 def dumps(value):
+    """Serialize a value to a sorted, deterministic JSON string."""
     return json.dumps(value, sort_keys=True)
