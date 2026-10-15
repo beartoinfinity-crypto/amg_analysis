@@ -18,6 +18,14 @@ Tables involved:
 | `pnl_bursts` | cache table of the same burst assembly, refreshed automatically at the end of every ingest (incrementally for touched flights) — query this for fast repeated PXE/PX6 lookups |
 | `pnl_remaps` | per-message PNL/ADL facts cache — flight element, boarding airport, part number, `pxe`/`px6`, `no_action`, `pax_on_board` (sum of all leg declared totals), `segment_count`; refreshed automatically at ingest time |
 | `pnl_remap` | view wrapping `pnl_remaps` (identical columns; query either — the view reads from the cache for instant results) |
+| `mvt_remap` | view: one row per MVT/MVA — flattened times (`ad_time`, `td_date`…), SI fuel/weight, IR/DL delay slots, pax split, flight header, `amg_reg` |
+| `div_remap` | view: one row per DIV — `can`, `pob`, `eta`, `dva` (corpus currently has 0 DIV messages; view is ready when they arrive) |
+| `ptm_remap` | view: one row per PTM — `total_transfers` (declared; sparse), `segment_count` (parsed) |
+| `ptm_segments` | view: PTM transfer segments — `flight`, `day`, `airports`, `cabin_bags` |
+| `assist_remap` | view: one row per PSM/PAL/CAL — `assist_codes` (JSON array), `pax_total` (PSM), `delta_add/del/chg` (CAL) |
+| `fwd_remap` | view: one row per FWD — `crew`, `destination`, `hops`, `rows`, `comp_a/b/l/r/t`, `nationalities` (JSON) |
+| `fwd_segments` | view: FWD per-hop rows — `hop`, `flight`, `destination`, `detail` |
+| `asm_remap` | view: one row per ASM — `airline`, `muted` (0/1) |
 
 **Flight identity.** A unique flight is the composite of `flight_number` +
 `scheduled_date` + `direction` (arrival / departure). The same flight number
@@ -920,4 +928,158 @@ FROM messages_readable r
 JOIN message_facts f ON f.message_id = r.id
 WHERE r.msg_type = 'ASM'
 ORDER BY r.received_at DESC;
+```
+
+## 13. Remap views (MVT/MVA, DIV, PTM, ASSIST, FWD, ASM)
+
+Flattened analytics views over structured facts — one row per message
+(companion segment views where the facts carry repeating rows). Columns are
+baked in at view-creation time; they rebuild automatically at ingest and can
+be rebuilt on demand via `python -m amg rebuild --db amg_messages.db`.
+
+### 13.1 mvt_remap (MVT, MVA)
+
+One row per movement message. Times are flattened to `<code>_time` /
+`<code>_date` pairs for every AHM 780 code (AD AB TD AA EL RA EO EA ED EAN
+EDP); SI values become `si_*`; delay slots become `ir1..ir8` (reason) and
+`dl1..dl8` (duration); pax becomes `pax_transit/disembarking/total/infants`;
+the flight header becomes `header_carrier/flight_num/day/reg/apt/suffix`.
+Booleans (`adp`/`abp`) come back as 0/1. The aircraft registration column is
+`amg_reg` (not `registration`).
+
+```sql
+SELECT received_at, flight_number, flight_airport, flight_date,
+       destination, adp, abp,
+       ad_time, td_time, aa_time, el_time,
+       ad_date, aa_date,
+       pax_total, amg_reg,
+       header_carrier, header_flight_num
+FROM mvt_remap
+ORDER BY received_at DESC
+LIMIT 100;
+```
+
+Movements with a departure delay reason (any IR slot populated):
+
+```sql
+SELECT received_at, flight_number, destination,
+       ir1, ir2, ir3, dl1, dl2
+FROM mvt_remap
+WHERE ir1 IS NOT NULL OR ir2 IS NOT NULL
+ORDER BY received_at DESC;
+```
+
+### 13.2 div_remap (DIV)
+
+One row per diversion: `can` (diverted flag), `pob` (persons on board),
+`eta`, `dva` (diverted-to airport). The corpus currently has no DIV
+messages, so the view is empty — it is ready when they arrive.
+
+```sql
+SELECT received_at, flight_number, can, pob, eta, dva
+FROM div_remap
+ORDER BY received_at DESC;
+```
+
+### 13.3 ptm_remap + ptm_segments (PTM)
+
+`ptm_remap` is one row per PTM message: `total_transfers` (the declared
+total — currently sparse, populated on ~50/5140 messages) and
+`segment_count` (number of parsed transfer segments). `ptm_segments`
+exposes the repeating rows: `flight`, `day`, `airports`, `cabin_bags`.
+
+```sql
+SELECT received_at, flight_number, flight_airport,
+       total_transfers, segment_count
+FROM ptm_remap
+WHERE segment_count IS NOT NULL
+ORDER BY received_at DESC
+LIMIT 100;
+```
+
+Per-segment transfer detail:
+
+```sql
+SELECT m.received_at, m.flight_number,
+       s.flight AS transfer_flight, s.day,
+       s.airports, s.cabin_bags
+FROM ptm_remap m
+JOIN ptm_segments s ON s.message_id = m.message_id
+ORDER BY m.received_at DESC, s.seq;
+```
+
+### 13.4 assist_remap (PSM, PAL, CAL)
+
+One row per assistance message. `assist_codes` is the JSON array of
+special-service codes (WCHR, WCHS, …) — SQLite returns it as JSON text;
+wrap in `json_each` to filter members. `pax_total` is present on PSM only.
+`delta_add`/`delta_del`/`delta_chg` come from the CAL delta dict; PSM/PAL
+leave them NULL.
+
+```sql
+SELECT received_at, msg_type, flight_number, assist_codes, pax_total
+FROM assist_remap
+ORDER BY received_at DESC
+LIMIT 100;
+```
+
+Messages carrying a specific assist code (WCHR):
+
+```sql
+SELECT received_at, msg_type, flight_number, assist_codes
+FROM assist_remap
+WHERE EXISTS (
+  SELECT 1 FROM json_each(assist_codes)
+  WHERE json_each.value = 'WCHR'
+)
+ORDER BY received_at DESC;
+```
+
+CAL deltas:
+
+```sql
+SELECT received_at, flight_number, delta_add, delta_del, delta_chg
+FROM assist_remap
+WHERE msg_type = 'CAL'
+ORDER BY received_at DESC;
+```
+
+### 13.5 fwd_remap + fwd_segments (FWD)
+
+`fwd_remap` is one row per FWD message: `crew` string, final `destination`,
+`hops` (connecting-flight count), `rows` (transfer-row count), per-letter
+component totals (`comp_a`, `comp_b`, `comp_l`, `comp_r`, `comp_t` — A
+air-to-air, B bookings, L slta, R transfers, T deadload kg), and
+`nationalities` as a JSON object. `fwd_segments` exposes the per-hop rows:
+`hop`, `flight`, `destination`, `detail`.
+
+```sql
+SELECT received_at, flight_number, flight_airport, crew,
+       destination, hops, rows,
+       comp_a, comp_b, comp_l, comp_r, comp_t
+FROM fwd_remap
+ORDER BY received_at DESC;
+```
+
+Per-hop detail for multi-hop FWDs:
+
+```sql
+SELECT m.received_at, m.flight_number, m.hops,
+       s.hop, s.flight, s.destination, s.detail
+FROM fwd_remap m
+JOIN fwd_segments s ON s.message_id = m.message_id
+WHERE m.hops > 1
+ORDER BY m.received_at DESC, s.seq;
+```
+
+### 13.6 asm_remap (ASM)
+
+One row per ASM message: the operating `airline` code and the `muted` flag
+(0/1). ASM carries no pax or movement detail.
+
+```sql
+SELECT received_at, flight_number, airline, muted
+FROM asm_remap
+WHERE muted = 1
+ORDER BY received_at DESC;
 ```

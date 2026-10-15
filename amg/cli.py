@@ -214,6 +214,195 @@ WHERE r.msg_type = 'LDM';
 """
 
 
+# MVT/MVA time codes emitted by extractors.TIME_CODE_MAP, in AHM 780 display
+# order. Each stores {time, date}; the view flattens to <code>_time/<code>_date.
+MVT_TIME_CODES = ["AD", "AB", "TD", "AA", "EL", "RA", "EO", "EA", "ED", "EAN", "EDP"]
+
+# MVT/MVA SI fuel/weight keys (extractors.SI_VALUE_KEYS values).
+MVT_SI_KEYS = ["fuel_remaining", "eet", "burn_off", "takeoff_fuel", "payload", "zfw"]
+
+# Delay slot names: IR1..IR8 (reason) and DL1..DL8 (duration, zero-padded).
+MVT_DELAY_SLOTS = [f"IR{i}" for i in range(1, 9)] + [f"DL{i}" for i in range(1, 9)]
+
+# FWD component letters (extractors FORWARD components dict keys).
+FWD_COMPONENT_LETTERS = ["A", "B", "L", "R", "T"]
+
+
+def _mvt_view_sql():
+    """Analytics view over structured MVT/MVA facts (AHM 780, spec v3).
+
+    One row per message. Flattens the nested ``times`` dict into
+    ``<code>_time``/``<code>_date`` pairs for every TIME_CODE_MAP code,
+    the ``si`` dict into ``si_*`` columns, the ``delays`` slots into
+    ``ir1..ir8``/``dl1..dl8``, the ``pax`` dict into ``pax_*`` columns, and
+    the MVT header into ``header_*`` columns. Booleans (adp/abp) come back
+    as 0/1. No INTERFACE_COLUMN_MAPPINGS is involved for MOVEMENT facts.
+    """
+    cols = [
+        "r.id AS message_id", "r.received_at", "r.msg_type",
+        "r.flight_number", "r.flight_airport", "r.flight_date",
+        "r.origin", "r.station",
+        "json_extract(f.facts_json, '$.destination') AS destination",
+        "json_extract(f.facts_json, '$.adp') AS adp",
+        "json_extract(f.facts_json, '$.abp') AS abp",
+    ]
+    for code in MVT_TIME_CODES:
+        cols.append(f"json_extract(f.facts_json, '$.times.{code}.time') AS {code.lower()}_time")
+        cols.append(f"json_extract(f.facts_json, '$.times.{code}.date') AS {code.lower()}_date")
+    for key in MVT_SI_KEYS:
+        cols.append(f"json_extract(f.facts_json, '$.si.{key}') AS si_{key}")
+    for slot in MVT_DELAY_SLOTS:
+        cols.append(f"json_extract(f.facts_json, '$.delays.{slot}') AS {slot.lower()}")
+    for key in ("transit", "disembarking", "total", "infants"):
+        cols.append(f"json_extract(f.facts_json, '$.pax.{key}') AS pax_{key}")
+    for key in ("carrier", "flight_num", "day", "reg", "apt", "suffix"):
+        cols.append(f"json_extract(f.facts_json, '$.flight_header.{key}') AS header_{key}")
+    cols.append("json_extract(f.facts_json, '$.AMG_REG') AS amg_reg")
+    selects_sql = ",\n       ".join(cols)
+    return f"""
+DROP VIEW IF EXISTS mvt_remap;
+CREATE VIEW mvt_remap AS
+SELECT {selects_sql}
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+WHERE r.msg_type IN ('MVT', 'MVA');
+"""
+
+
+def _div_view_sql():
+    """Analytics view over DIVERSION facts (extract_diversion).
+
+    One row per message: can (diverted flag), pob, eta, dva. DIV messages
+    are rare; the view is ready for them regardless of current row count.
+    """
+    return """
+DROP VIEW IF EXISTS div_remap;
+CREATE VIEW div_remap AS
+SELECT r.id AS message_id, r.received_at, r.msg_type,
+       r.flight_number, r.flight_airport, r.flight_date,
+       json_extract(f.facts_json, '$.can') AS can,
+       json_extract(f.facts_json, '$.pob') AS pob,
+       json_extract(f.facts_json, '$.eta') AS eta,
+       json_extract(f.facts_json, '$.dva') AS dva
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+WHERE r.msg_type = 'DIV';
+"""
+
+
+def _ptm_view_sql():
+    """Analytics view over TRANSFER (PTM) facts + a companion segment view.
+
+    ``ptm_remap`` is one row per PTM message with the declared transfer
+    total and the parsed-segment count. ``ptm_segments`` exposes the
+    repeating flight/day/airport/bag rows stored in message_segments.
+    """
+    return """
+DROP VIEW IF EXISTS ptm_remap;
+CREATE VIEW ptm_remap AS
+SELECT r.id AS message_id, r.received_at, r.msg_type,
+       r.flight_number, r.flight_airport, r.flight_date,
+       json_extract(f.facts_json, '$.total_transfers') AS total_transfers,
+       json_extract(f.facts_json, '$.segments') AS segment_count
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+WHERE r.msg_type = 'PTM';
+DROP VIEW IF EXISTS ptm_segments;
+CREATE VIEW ptm_segments AS
+SELECT s.message_id, s.seq,
+       json_extract(s.data_json, '$.flight') AS flight,
+       json_extract(s.data_json, '$.day') AS day,
+       json_extract(s.data_json, '$.airports') AS airports,
+       json_extract(s.data_json, '$.cabin_bags') AS cabin_bags
+FROM message_segments s
+JOIN messages m ON m.id = s.message_id
+WHERE m.msg_type = 'PTM';
+"""
+
+
+def _assist_view_sql():
+    """Analytics view over ASSISTANCE facts (PSM/PAL/CAL).
+
+    One row per message. ``assist_codes`` is the JSON array of special-
+    service codes (WCHR, WCHS, ...). ``delta_add``/``delta_del``/``delta_chg``
+    come from the CAL delta dict; PSM/PAL leave them NULL. ``pax_total`` is
+    present on PSM only.
+    """
+    return """
+DROP VIEW IF EXISTS assist_remap;
+CREATE VIEW assist_remap AS
+SELECT r.id AS message_id, r.received_at, r.msg_type,
+       r.flight_number, r.flight_airport, r.flight_date,
+       json_extract(f.facts_json, '$.assist_codes') AS assist_codes,
+       json_extract(f.facts_json, '$.pax_total') AS pax_total,
+       json_extract(f.facts_json, '$.delta.ADD') AS delta_add,
+       json_extract(f.facts_json, '$.delta.DEL') AS delta_del,
+       json_extract(f.facts_json, '$.delta.CHG') AS delta_chg
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+WHERE r.msg_type IN ('PSM', 'PAL', 'CAL');
+"""
+
+
+def _fwd_view_sql():
+    """Analytics view over FORWARD (FWD) facts + a companion segment view.
+
+    ``fwd_remap`` is one row per FWD message: crew string, final
+    destination, hop/row counts, per-letter component totals (A/B/L/R/T),
+    and the aggregate nationalities dict as JSON. ``fwd_segments``
+    exposes the per-hop flight/destination/detail rows.
+    """
+    cols = [
+        "r.id AS message_id", "r.received_at", "r.msg_type",
+        "r.flight_number", "r.flight_airport", "r.flight_date",
+        "json_extract(f.facts_json, '$.crew') AS crew",
+        "json_extract(f.facts_json, '$.destination') AS destination",
+        "json_extract(f.facts_json, '$.hops') AS hops",
+        "json_extract(f.facts_json, '$.rows') AS rows",
+    ]
+    for letter in FWD_COMPONENT_LETTERS:
+        cols.append(f"json_extract(f.facts_json, '$.components.{letter}') AS comp_{letter.lower()}")
+    cols.append("json_extract(f.facts_json, '$.nationalities') AS nationalities")
+    selects_sql = ",\n       ".join(cols)
+    return f"""
+DROP VIEW IF EXISTS fwd_remap;
+CREATE VIEW fwd_remap AS
+SELECT {selects_sql}
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+WHERE r.msg_type = 'FWD';
+DROP VIEW IF EXISTS fwd_segments;
+CREATE VIEW fwd_segments AS
+SELECT s.message_id, s.seq,
+       json_extract(s.data_json, '$.hop') AS hop,
+       json_extract(s.data_json, '$.flight') AS flight,
+       json_extract(s.data_json, '$.destination') AS destination,
+       json_extract(s.data_json, '$.detail') AS detail
+FROM message_segments s
+JOIN messages m ON m.id = s.message_id
+WHERE m.msg_type = 'FWD';
+"""
+
+
+def _asm_view_sql():
+    """Analytics view over SCHEDULE (ASM) facts.
+
+    One row per ASM message: the operating airline code and the muted
+    flag (0/1). ASM carries no pax or movement detail.
+    """
+    return """
+DROP VIEW IF EXISTS asm_remap;
+CREATE VIEW asm_remap AS
+SELECT r.id AS message_id, r.received_at, r.msg_type,
+       r.flight_number, r.flight_airport, r.flight_date,
+       json_extract(f.facts_json, '$.airline') AS airline,
+       json_extract(f.facts_json, '$.muted') AS muted
+FROM messages_readable r
+JOIN message_facts f ON f.message_id = r.id
+WHERE r.msg_type = 'ASM';
+"""
+
+
 def _amg_pax_view_sql():
     """Passenger-count view consolidating LDM, PNL/ADL and FWD pax data.
 
@@ -268,7 +457,17 @@ GROUP BY m.id;
 
 
 def build_schema():
-    return SCHEMA + _remap_view_sql() + _pnl_view_sql() + _pnl_burst_view_sql() + _amg_pax_view_sql()
+    return (SCHEMA
+            + _remap_view_sql()
+            + _pnl_view_sql()
+            + _pnl_burst_view_sql()
+            + _amg_pax_view_sql()
+            + _mvt_view_sql()
+            + _div_view_sql()
+            + _ptm_view_sql()
+            + _assist_view_sql()
+            + _fwd_view_sql()
+            + _asm_view_sql())
 
 
 PNL_VIEW_COLUMNS = [
