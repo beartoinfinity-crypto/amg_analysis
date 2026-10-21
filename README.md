@@ -40,9 +40,26 @@ Double-click `start_archive_loader.bat` (or run `python -m amg gui`). The window
 | **Full rebuild** | wipes the index and re-parses every archive from scratch - use after a parsing-rule change |
 | **Stop** | halts a running import/rebuild cleanly between archives |
 
-Progress shows per archive; the final summary appears in the status bar. If the
-database is open in DB Browser (or another program) you will see a clear
-"database is locked" message instead of silent failures - close it and retry.
+Progress shows per archive; a completion dialog echoes the result —
+"*Import complete: N ingested, M skipped (elapsed Xs)*" on success, a warning
+if any archive failed (re-tick them and press Import again), and an error
+dialog if the run itself failed. If the database is open in DB Browser (or
+another program) you will see a clear "database is locked" message instead of
+silent failures - close it and retry.
+
+### Message analysis window
+
+Paste a raw Type B message and extract its structured fields per family. On
+Windows, build the desktop exe once and double-click it:
+
+```
+build_msg_analysis.bat      -> dist\AMGMsgAnalysis.exe
+```
+
+Or run it from source with `start_msg_analysis.bat` / `python -m
+amg.msg_analysis`. Tabs cover LDM, MVT/MVA, FWD, DIV, PTM, PSM/PAL/CAL and
+ASM; each shows header facts and repeating rows (destination segments,
+transfer hops) with "Copy results" support.
 
 ### Standalone test-message generator
 

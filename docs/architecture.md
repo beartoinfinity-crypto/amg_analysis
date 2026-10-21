@@ -411,11 +411,14 @@ Thin by design: widget wiring only; all work happens in `ingest_archives` /
   the worker NEVER touches widgets directly - it posts UI updates through
   `root.after(0, ...)`. One `threading.Event` (`stop_event`) set by the Stop
   button ends the loop between archives (per-archive commits make that safe).
-- Errors surface in the status bar via `finish_error` - an earlier version
-  let exceptions kill the worker thread, leaving buttons dead and no
+- Errors surface in the status bar **and in an explicit error dialog**
+  (`finish_error` → `messagebox.showerror`) — an earlier version let
+  exceptions kill the worker thread, leaving buttons dead and no
   explanation. Do not regress this.
 - Buttons disable while busy; `finish_import(..., stopped)` reports
-  "stopped:" vs "done:" and refreshes states.
+  "stopped:" vs "done:", refreshes states, and pops a completion message box
+  (info on success — incl. elapsed time and the target DB path; warning on
+  failures or a Stop). The status bar stays as the quieter running record.
 
 ---
 
