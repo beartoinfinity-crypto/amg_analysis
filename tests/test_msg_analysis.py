@@ -2,7 +2,7 @@ import tkinter as tk
 
 import pytest
 
-from amg.extractor_gui import MessageExtractor
+from amg.msg_analysis import MessageAnalyzer
 
 LDM_BODY = (
     "\r\n\x01QD HKGTSXH\r\n"
@@ -93,7 +93,7 @@ ASM_BODY = (
 def app():
     root = tk.Tk()
     root.withdraw()
-    gui = MessageExtractor(root)
+    gui = MessageAnalyzer(root)
     yield gui
     root.destroy()
 

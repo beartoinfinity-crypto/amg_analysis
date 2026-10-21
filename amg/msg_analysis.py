@@ -5,7 +5,7 @@ from amg import extractors
 from amg.generator import normalize_text
 
 
-class ExtractorTab:
+class AnalysisTab:
     def __init__(self, parent, label, extract_fn):
         self.extract_fn = extract_fn
         frame = ttk.Frame(parent, padding=8)
@@ -270,42 +270,42 @@ def _extract_asm(text):
     ]
 
 
-class MessageExtractor:
+class MessageAnalyzer:
     def __init__(self, root):
         self.root = root
-        root.title('AMG Message Field Extractor')
+        root.title('AMG Msg Analysis')
         root.geometry('950x750')
         root.minsize(750, 550)
 
         notebook = ttk.Notebook(root)
         notebook.pack(fill='both', expand=True, padx=8, pady=8)
 
-        self.ldm_tab = ExtractorTab(notebook, 'Paste raw LDM message (AHM 583)',
+        self.ldm_tab = AnalysisTab(notebook, 'Paste raw LDM message (AHM 583)',
                                     _extract_ldm)
         notebook.add(self.ldm_tab.frame, text='LDM')
 
-        self.mvt_tab = ExtractorTab(notebook, 'Paste raw MVT / MVA message (AHM 780)',
+        self.mvt_tab = AnalysisTab(notebook, 'Paste raw MVT / MVA message (AHM 780)',
                                     _extract_mvt)
         notebook.add(self.mvt_tab.frame, text='MVT / MVA')
 
-        self.fwd_tab = ExtractorTab(notebook, 'Paste raw FWD message (SY311)',
+        self.fwd_tab = AnalysisTab(notebook, 'Paste raw FWD message (SY311)',
                                     _extract_fwd)
         notebook.add(self.fwd_tab.frame, text='FWD')
 
-        self.div_tab = ExtractorTab(notebook, 'Paste raw DIV message (AHM 781)',
+        self.div_tab = AnalysisTab(notebook, 'Paste raw DIV message (AHM 781)',
                                     _extract_div)
         notebook.add(self.div_tab.frame, text='DIV')
 
-        self.ptm_tab = ExtractorTab(notebook, 'Paste raw PTM message (RP 1718)',
+        self.ptm_tab = AnalysisTab(notebook, 'Paste raw PTM message (RP 1718)',
                                     _extract_ptm)
         notebook.add(self.ptm_tab.frame, text='PTM')
 
-        self.assist_tab = ExtractorTab(notebook,
+        self.assist_tab = AnalysisTab(notebook,
                                        'Paste raw PSM / PAL / CAL message (RP 1715 / 1708a)',
                                        _extract_assist)
         notebook.add(self.assist_tab.frame, text='PSM / PAL / CAL')
 
-        self.asm_tab = ExtractorTab(notebook, 'Paste raw ASM message (IATA SSM)',
+        self.asm_tab = AnalysisTab(notebook, 'Paste raw ASM message (IATA SSM)',
                                     _extract_asm)
         notebook.add(self.asm_tab.frame, text='ASM')
 
@@ -315,7 +315,7 @@ class MessageExtractor:
 
 def main(argv=None):
     root = tk.Tk()
-    MessageExtractor(root)
+    MessageAnalyzer(root)
     root.mainloop()
     return 0
 

@@ -1,4 +1,4 @@
-from amg.extractor_gui import main
+from amg.msg_analysis import main
 
 if __name__ == '__main__':
     raise SystemExit(main())

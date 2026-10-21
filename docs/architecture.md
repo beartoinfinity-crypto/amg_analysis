@@ -10,6 +10,7 @@ behind it, and the traps to avoid. For user-facing documentation see
 amg/cli.py      core: parsing, ingestion, query commands, argparse entry point
 amg/extractors.py per-family extractors: MVT, LDM, DIV, PTM, PSM/PAL/CAL, PNL/ADL, FWD, ASM
 amg/gui.py      thin tkinter layer over cli core functions (no business logic)
+amg/msg_analysis.py tabbed per-family field-analysis window -> `python -m amg.msg_analysis`
 amg/__main__.py enables `python -m amg`
 amg/generator.py template-library access, structured replacements and export
 amg/gen_gui.py  standalone tkinter generator -> `python -m amg.gen_gui`
@@ -17,8 +18,11 @@ amg/message_templates.json bundled synthetic template library
 start_gen_gui.bat source generator launcher (forwards arguments)
 gen_gui_launcher.py PyInstaller entry point for the generator
 build_gen_gui.bat Windows onefile executable build
+start_msg_analysis.bat source analyzer launcher (forwards arguments)
+msg_analysis_launcher.py PyInstaller entry point for the analyzer
+build_msg_analysis.bat Windows onefile executable build
 tests/          CLI, database, pure helper and generator GUI tests
-run.bat         double-click archive loader -> `python -m amg gui`
+start_archive_loader.bat double-click archive loader -> `python -m amg gui`
 ```
 
 The archive CLI and loader GUI share the core functions in `cli.py`.
