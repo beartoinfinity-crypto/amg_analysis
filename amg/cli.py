@@ -160,10 +160,38 @@ CREATE TABLE IF NOT EXISTS pnl_remaps (
   pax_on_board INTEGER,
   segment_count INTEGER
 );
+CREATE TABLE IF NOT EXISTS amg_pax_cache (
+  message_id INTEGER PRIMARY KEY,
+  msg_type TEXT,
+  flight_number TEXT,
+  flight_date TEXT,
+  flight_airport TEXT,
+  ldm_pax_total INTEGER,
+  ldm_adults INTEGER,
+  ldm_children INTEGER,
+  ldm_infants INTEGER,
+  ldm_dest TEXT,
+  pnl_declared_total INTEGER,
+  pnl_pad_total INTEGER,
+  pnl_actual_parsed_pax INTEGER,
+  pnl_dest TEXT,
+  fwd_bookings INTEGER,
+  fwd_transfers INTEGER,
+  fwd_air_to_air INTEGER,
+  fwd_sea_land INTEGER
+);
 CREATE INDEX IF NOT EXISTS idx_messages_type_flight
   ON messages (msg_type, flight_number);
+CREATE INDEX IF NOT EXISTS idx_messages_received
+  ON messages (received_at);
+CREATE INDEX IF NOT EXISTS idx_messages_status
+  ON messages (status);
+CREATE INDEX IF NOT EXISTS idx_messages_origin
+  ON messages (origin);
+CREATE INDEX IF NOT EXISTS idx_messages_destination
+  ON messages (destination);
 CREATE INDEX IF NOT EXISTS idx_segments_message
-  ON message_segments (message_id);
+  ON message_segments (message_id, seq);
 CREATE INDEX IF NOT EXISTS idx_pnl_bursts_flight
   ON pnl_bursts (flight_number, complete);
 CREATE VIEW IF NOT EXISTS messages_readable AS
@@ -416,19 +444,18 @@ WHERE r.msg_type = 'ASM';
 """
 
 
-def _amg_pax_view_sql():
-    """Passenger-count view consolidating LDM, PNL/ADL and FWD pax data.
+def _amg_pax_select_sql(extra_where=""):
+    """Per-message AMG_PAX SELECT for cache building.
 
-    One row per message. LDM columns come from LOAD segments (pax_total,
-    adults, children, infants); PNL/ADL columns from NAME_LIST segments
-    (declared_total excluding PAD, pad_total, actual_parsed_pax); FWD
-    columns from FORWARD segments (bookings PXE, transfers PX5, air-to-air
-    PXT, sea/land PXU). NULL when the message has no segment data for that
-    family. This is the DB-facing query point for the AMG_PAX concept.
+    One row per LDM/PNL/ADL/FWD message, pax columns pulled from the
+    per-family segment rows (see the AMG_PAX view docstring for column
+    semantics).
+
+    ``extra_where`` is injected into the WHERE clause (e.g. an AND
+    ``m.id IN (...)`` filter) so cache refreshes can prune the scan to
+    touched messages.
     """
-    return """
-DROP VIEW IF EXISTS AMG_PAX;
-CREATE VIEW AMG_PAX AS
+    return f"""
 SELECT
     m.id AS message_id,
     m.msg_type,
@@ -464,8 +491,28 @@ SELECT
 FROM messages m
 LEFT JOIN message_facts mf ON mf.message_id = m.id
 LEFT JOIN message_segments ms ON ms.message_id = m.id
-WHERE m.msg_type IN ('LDM', 'PNL', 'ADL', 'FWD')
+WHERE m.msg_type IN ('LDM', 'PNL', 'ADL', 'FWD'){extra_where}
 GROUP BY m.id;
+"""
+
+
+def _amg_pax_view_sql():
+    """Passenger-count view consolidating LDM, PNL/ADL and FWD pax data.
+
+    One row per message. LDM columns come from LOAD segments (pax_total,
+    adults, children, infants); PNL/ADL columns from NAME_LIST segments
+    (declared_total excluding PAD, pad_total, actual_parsed_pax); FWD
+    columns from FORWARD segments (bookings PXE, transfers PX5, air-to-air
+    PXT, sea/land PXU). NULL when the message has no segment data for that
+    family. This is the DB-facing query point for the AMG_PAX concept.
+
+    Reads from the ``amg_pax_cache`` table for instant results; the cache
+    is refreshed at ingest time (fully on first ingest, then just the
+    touched messages).
+    """
+    return """
+DROP VIEW IF EXISTS AMG_PAX;
+CREATE VIEW AMG_PAX AS SELECT * FROM amg_pax_cache;
 """
 
 
@@ -571,7 +618,7 @@ def _pnl_burst_select_sql(extra_where=""):
     flights.
     """
     return f"""
-WITH parts AS (
+WITH parts AS MATERIALIZED (
   SELECT r.id AS message_id, r.received_at, r.msg_type, r.flight_number,
          json_extract(f.facts_json, '$.boarding_airport') AS boarding_airport,
          json_extract(f.facts_json, '$.dep_day') AS dep_day,
@@ -680,8 +727,10 @@ ORDER BY b.burst_key, b.first_seen;
 
 
 def _pnl_burst_view_sql():
-    """Burst view over the assembly SELECT (computed on demand, slow on the
-    full corpus - prefer the pnl_bursts cache table for repeated queries)."""
+    """Burst view over the assembly SELECT (computed on demand - the parts
+    CTE is materialized once, but it still parses the full PNL/ADL segment
+    corpus on every query; prefer the pnl_bursts cache table for repeated
+    queries)."""
     return f"""
 DROP VIEW IF EXISTS pnl_burst;
 CREATE VIEW pnl_burst AS {_pnl_burst_select_sql()};
@@ -1075,12 +1124,46 @@ def refresh_message_cache(con, flights=None):
     con.commit()
 
 
+def refresh_amg_pax_cache(con, message_ids=None):
+    """Rebuild amg_pax_cache rows.
+
+    With ``message_ids``, only those messages are refreshed (deleted then
+    recomputed) so an incremental ingest refreshes just what it touched.
+    Without them, the whole cache is rebuilt. Empty cache + no ids still
+    does a full rebuild, so the first ingest backfills automatically.
+    Message ids rather than flights are the refresh key here because
+    AMG_PAX rows are per message spanning LDM/PNL/ADL/FWD families.
+    """
+    con.executescript(build_schema())
+    if message_ids is not None:
+        if not message_ids:
+            con.commit()
+            return
+        if len(message_ids) > 20000:
+            refresh_amg_pax_cache(con)
+            return
+        qmarks = ",".join("?" * len(message_ids))
+        con.execute(f"DELETE FROM amg_pax_cache WHERE message_id IN ({qmarks})",
+                    message_ids)
+        con.execute(
+            "INSERT INTO amg_pax_cache " + _amg_pax_select_sql(
+                f" AND m.id IN ({qmarks})"
+            ),
+            message_ids,
+        )
+    else:
+        con.execute("DELETE FROM amg_pax_cache")
+        con.execute("INSERT INTO amg_pax_cache " + _amg_pax_select_sql())
+    con.commit()
+
+
 def ingest_archives(archive_paths, db_path, progress=None, should_stop=None):
     """Ingest multiple tar archives into the database.
 
     Skips archives already ingested (name+size match). Commits per archive,
     rolls back on failure. Rebuilds the FTS index and refreshes
-    ``pnl_bursts`` / ``pnl_remaps`` if any new data was ingested.
+    ``pnl_bursts`` / ``pnl_remaps`` / ``amg_pax_cache`` if any new data was
+    ingested.
 
     Args:
         archive_paths: List of pathlib paths to tar archives.
@@ -1100,6 +1183,7 @@ def ingest_archives(archive_paths, db_path, progress=None, should_stop=None):
     done = 0
     total = len(archive_paths)
     touched_flights = set()
+    ingested_names = []
     for archive_path in archive_paths:
         if should_stop and should_stop():
             break
@@ -1110,6 +1194,7 @@ def ingest_archives(archive_paths, db_path, progress=None, should_stop=None):
                 touched_flights.update(ingest_archive(archive_path, con))
                 con.commit()
                 ingested += 1
+                ingested_names.append(archive_path.name)
             except Exception as error:
                 con.rollback()
                 print(f"failed to ingest {archive_path.name}: {error}", file=sys.stderr)
@@ -1133,6 +1218,19 @@ def ingest_archives(archive_paths, db_path, progress=None, should_stop=None):
         refresh_message_cache(con)
     elif touched_flights:
         refresh_message_cache(con, sorted(touched_flights))
+    touched_ids = []
+    if ingested_names:
+        qmarks = ",".join("?" * len(ingested_names))
+        touched_ids = [row[0] for row in con.execute(
+            f"SELECT id FROM messages WHERE source_archive IN ({qmarks})"
+            " AND msg_type IN ('LDM', 'PNL', 'ADL', 'FWD')",
+            ingested_names,
+        )]
+    pax_cache_rows = con.execute("SELECT COUNT(*) FROM amg_pax_cache").fetchone()[0]
+    if not pax_cache_rows:
+        refresh_amg_pax_cache(con)
+    elif touched_ids:
+        refresh_amg_pax_cache(con, touched_ids)
     con.close()
     return ingested, skipped, failed
 
@@ -1142,10 +1240,11 @@ def _migrate(con):
 
     ``CREATE TABLE IF NOT EXISTS`` never adds columns to a table that already
     exists and never replaces an existing view, so older databases need
-    explicit migration here. Currently adds ``messages.raw_text_plain`` and
-    re-creates ``messages_readable`` to expose it. A pnl_bursts cache from a
-    previous shape is dropped - it is derived data, and the next ingest
-    auto-backfills it.
+    explicit migration here. Currently adds ``messages.raw_text_plain``,
+    re-creates ``messages_readable`` to expose it, and upgrades
+    ``idx_segments_message`` to the (message_id, seq) covering shape.
+    A pnl_bursts cache from a previous shape is dropped - it is derived
+    data, and the next ingest auto-backfills it.
     """
     cols = {c[1] for c in con.execute("PRAGMA table_info(messages)")}
     if "raw_text_plain" not in cols:
@@ -1156,6 +1255,14 @@ def _migrate(con):
     remap_cols = {c[1] for c in con.execute("PRAGMA table_info(pnl_remaps)")}
     if remap_cols and "pax_on_board" not in remap_cols:
         con.execute("DROP TABLE pnl_remaps")
+    # Upgrade the segment index to the covering (message_id, seq) shape:
+    # CREATE INDEX IF NOT EXISTS keeps an old single-column definition on
+    # existing databases, so drop it and let build_schema recreate it.
+    seg_index = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_segments_message'"
+    ).fetchone()
+    if seg_index and ", seq" not in seg_index[0]:
+        con.execute("DROP INDEX idx_segments_message")
     # Always rebuild the readable view so it tracks the current column set.
     con.execute("DROP VIEW IF EXISTS messages_readable")
     con.executescript(build_schema())
@@ -1213,6 +1320,7 @@ def rebuild_archives(archive_paths, db_path, progress=None, should_stop=None):
     con.execute("DELETE FROM message_facts")
     con.execute("DELETE FROM pnl_bursts")
     con.execute("DELETE FROM pnl_remaps")
+    con.execute("DELETE FROM amg_pax_cache")
     con.execute("DELETE FROM messages")
     con.execute("DELETE FROM archives")
     con.commit()

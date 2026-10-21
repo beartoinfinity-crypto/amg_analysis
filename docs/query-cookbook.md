@@ -14,10 +14,12 @@ Tables involved:
 | `message_segments` | repeating rows (PTM transfers, FWD hops, LDM destination segments): `seq`, `data_json` (JSON object) |
 | `messages_fts` | FTS5 index over `raw_text`; query via `MATCH` on `rowid` |
 | `archives` | ingested archive names + sizes (used by dedup logic) |
-| `pnl_burst` | view: multi-part PNL/ADL transmission assembled to burst level — completeness gate (`complete` = final terminator seen), per-(dest,cabin) block totals, burst `pxe`/`px6` (computed on demand; slow on the full corpus) |
+| `pnl_burst` | view: multi-part PNL/ADL transmission assembled to burst level — completeness gate (`complete` = final terminator seen), per-(dest,cabin) block totals, burst `pxe`/`px6` (computed on demand — parts CTE materialized once; still ~5s over the full corpus, prefer `pnl_bursts`) |
 | `pnl_bursts` | cache table of the same burst assembly, refreshed automatically at the end of every ingest (incrementally for touched flights) — query this for fast repeated PXE/PX6 lookups |
 | `pnl_remaps` | per-message PNL/ADL facts cache — flight element, boarding airport, part number, `pxe`/`px6`, `no_action`, `pax_on_board` (sum of all leg declared totals), `segment_count`; refreshed automatically at ingest time |
 | `pnl_remap` | view wrapping `pnl_remaps` (identical columns; query either — the view reads from the cache for instant results) |
+| `amg_pax_cache` | cache table of per-message pax counts — refreshed automatically at the end of every ingest (full on first ingest, then just the touched messages) |
+| `AMG_PAX` | view wrapping `amg_pax_cache`: one row per LDM/PNL/ADL/FWD message with `ldm_*` (pax_total/adults/children/infants/dest), `pnl_*` (declared_total/pad_total/actual_parsed_pax/dest) and `fwd_*` (bookings/transfers/air_to_air/sea_land) columns — NULL per family |
 | `mvt_remap` | view: one row per MVT/MVA — flattened times (`ad_time`, `td_date`…), SI fuel/weight, IR/DL delay slots, pax split, flight header, `amg_reg` |
 | `div_remap` | view: one row per DIV — `can`, `pob`, `eta`, `dva` (corpus currently has 0 DIV messages; view is ready when they arrive) |
 | `ptm_remap` | view: one row per PTM — `total_transfers` (declared; sparse), `segment_count` (parsed) |
@@ -806,8 +808,8 @@ rules as the extractor).
 **Query the `pnl_bursts` cache table** (identical columns, refreshed
 automatically at the end of every ingest — incrementally for just the flights
 the ingest touched): it answers instantly. The `pnl_burst` view computes the
-same assembly on demand and takes ~a minute over the full corpus — fine for a
-one-off, wrong for repeated lookups.
+same assembly on demand and is materialized once but still takes about five
+seconds over the full corpus — fine for a one-off, wrong for repeated lookups.
 
 ```sql
 -- One row per assembled (dest, cabin) block of each burst
@@ -1083,3 +1085,39 @@ FROM asm_remap
 WHERE muted = 1
 ORDER BY received_at DESC;
 ```
+
+## 14. Performance notes
+
+Measured against the full corpus (70k messages, 200k segments):
+`python -m amg` queries and DB Browser sessions should stay instant if you
+follow these rules.
+
+**Caches are the query surface for heavy analytics.** Three derived cache
+tables are refreshed automatically at the end of every ingest (fully on the
+first ingest, then incrementally for what the ingest touched):
+
+| Cache | Refresh key | View on top |
+| --- | --- | --- |
+| `pnl_remaps` | touched flights | `pnl_remap` |
+| `pnl_bursts` | touched flights | (none — query the table) |
+| `amg_pax_cache` | touched messages (LDM/PNL/ADL/FWD) | `AMG_PAX` |
+
+`AMG_PAX` used to re-parse ~200k segment JSON blobs per query (~4.7s full,
+~2s even for a small point lookup) — it is now a straight cache read (~3ms).
+Never hand-sum its columns; see §12.6 for burst-level totals.
+
+**Indexes on `messages`.** Beyond `idx_messages_type_flight` there are
+`idx_messages_received` (newest-first lists, date-range filters, day/hour
+stats), `idx_messages_status`, `idx_messages_origin` and
+`idx_messages_destination` — the CLI's `search --from/--to`, `stats` and
+airport filters all hit these instead of scanning. `order by received_at
+desc limit N` runs in ~1ms.
+
+**`idx_segments_message` is `(message_id, seq)`** — the segment views and the
+burst assembly read segments in `seq` order via the index instead of a
+`message_segments` sort.
+
+**Remaining slow path (documented, not fixed).** The on-demand `pnl_burst`
+view still parses the full PNL/ADL segment corpus each call (~5s after the
+parts CTE was made MATERIALIZED). Use the `pnl_bursts` cache table; keep the
+view for one-off freshness checks.
