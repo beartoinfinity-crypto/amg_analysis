@@ -1,4 +1,5 @@
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -13,6 +14,7 @@ class ArchivePicker:
         self.db_path = db_path
         self.busy = False
         self.stop_event = threading.Event()
+        self.work_label = ""
 
         root.title("AMG Message Toolkit")
         root.geometry("760x520")
@@ -166,12 +168,14 @@ class ArchivePicker:
         self.select_all_cb.state(["disabled"])
         self.stop_button.state(["!disabled"])
         work = rebuild_archives if rebuild else ingest_archives
-        label = "rebuilding" if rebuild else "importing"
+        self.work_label = "Rebuild" if rebuild else "Import"
+        self.started_at = time.monotonic()
 
         def progress(done, total, ingested, failed):
             self.root.after(
                 0, self.set_status,
-                f"{label} {done}/{total} - {ingested} imported, {failed} failed",
+                f"{self.work_label.lower()}ing {done}/{total} - {ingested}"
+                f" imported, {failed} failed",
             )
 
         def should_stop():
@@ -207,11 +211,20 @@ class ArchivePicker:
     def finish_error(self, message):
         self._set_busy(False)
         self.status_var.set(f"failed: {message}")
+        title = getattr(self, "work_label", "") or "Ingest"
+        messagebox.showerror(f"{title} failed", message)
+        self.refresh()
 
     def set_status(self, text):
         self.status_var.set(text)
 
     def finish_import(self, ingested, skipped, failed, stopped=False):
+        """Show the result of a finished ingest/rebuild run.
+
+        Updates the status bar and pops an explicit message box so the
+        user cannot miss that the import finished. A run with failures
+        raises a warning-styled popup instead of an info one.
+        """
         self.busy = False
         self._set_busy(False)
         self.refresh()
@@ -219,6 +232,26 @@ class ArchivePicker:
         self.status_var.set(
             f"{prefix}: {ingested} ingested, {skipped} skipped, {failed} failed"
         )
+        seconds = time.monotonic() - self.started_at
+        label = self.work_label
+        if stopped:
+            title = f"{label} stopped"
+            text = (f"{prefix}: {ingested} ingested, {skipped} skipped,"
+                    f" {failed} failed (elapsed {seconds:.0f}s)")
+        elif failed:
+            title = f"{label} finished with errors"
+            text = (f"{failed} archive(s) failed to ingest"
+                    f" ({ingested} ingested, {skipped} skipped).\n"
+                    "Re-run Import selected to retry the failed ones.")
+        else:
+            title = f"{label} complete"
+            text = (f"{ingested} archive(s) ingested, {skipped} skipped"
+                    f" (elapsed {seconds:.0f}s).\n\nResults are in"
+                    f" {self.db_path}.")
+        if stopped or failed:
+            messagebox.showwarning(title, text)
+        else:
+            messagebox.showinfo(title, text)
 
 
 def run_gui(archive_dir, db_path):

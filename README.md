@@ -31,7 +31,7 @@ pip install -e .
 
 ### Quick start (GUI)
 
-Double-click `run.bat` (or run `python -m amg gui`). The window lists every
+Double-click `start_archive_loader.bat` (or run `python -m amg gui`). The window lists every
 `*.tar.Z` with its size and indexed/pending state.
 
 | Button | What it does |
