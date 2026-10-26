@@ -1,10 +1,12 @@
-# Spec: AMG Message Toolkit
+﻿# Spec: AMG Message Toolkit
 
-Status: ready-for-agent
+Status: resolved
+
+Implemented 2026-10-20 - see docs/architecture.md and docs/query-cookbook.md.
 
 ## Problem Statement
 
-SITA IATA Type B messages arrive as daily `.tar.Z` archives under `AMG_msg/` — one raw text file per message inside a station folder, with `PROCESSED_` and `CORRUPTED_` prefixes. Finding every message about a flight, counting volumes by type or hour, or investigating what failed on a given day means manually extracting archives and grepping raw text. The data is effectively unsearchable and unanalysable.
+SITA IATA Type B messages arrive as daily `.tar.Z` archives under `AMG_msg/` ??one raw text file per message inside a station folder, with `PROCESSED_` and `CORRUPTED_` prefixes. Finding every message about a flight, counting volumes by type or hour, or investigating what failed on a given day means manually extracting archives and grepping raw text. The data is effectively unsearchable and unanalysable.
 
 ## Solution
 
@@ -17,7 +19,7 @@ A command-line toolkit that treats the archives as immutable input: it ingests t
 3. As a message analyst, I want re-ingesting an already-indexed archive to change nothing, so that ingest is safe to run at any time.
 4. As a message analyst, I want to search messages by flight number, so that I can pull up everything about e.g. CI5825.
 5. As a message analyst, I want to search by date and time range, so that I can isolate an incident window.
-6. As a message analyst, I want to filter by message type (MVT, MVA, CHG, BSM, PNL, CPM, …), so that I can work with just movement or just baggage traffic.
+6. As a message analyst, I want to filter by message type (MVT, MVA, CHG, BSM, PNL, CPM, ??, so that I can work with just movement or just baggage traffic.
 7. As a message analyst, I want to filter by origin or destination address, so that I can trace correspondence with one counterpart address.
 8. As a message analyst, I want free-text search across full message bodies, so that I can find messages mentioning a tail number, passenger name, or error string.
 9. As a message analyst, I want to combine filters freely, so that I can ask narrow questions like "CHG messages for flight X yesterday".
@@ -38,12 +40,12 @@ A command-line toolkit that treats the archives as immutable input: it ingests t
 
 ## Implementation Decisions
 
-- Python 3 CLI application; standard library first; pytest for tests. Greenfield repo — no existing code constrains layout.
+- Python 3 CLI application; standard library first; pytest for tests. Greenfield repo ??no existing code constrains layout.
 - One deep module behind one CLI entry point exposing subcommands: `ingest`, `search`, `show`, `stats`, `status`.
 - Archives are immutable input. All derived state lives in a single SQLite database file at a configurable path, defaulting outside the archive folder.
 - Ingest discovers `*.tar.Z` archives sorted by name, skips ones already recorded in the database (tracked by filename and size), extracts via the system `tar` subprocess (LZW `.Z` is not readable by the Python stdlib; bsdtar handles it and is present on this machine), then walks the extracted tree.
 - Archive filenames encode processing outcome and date (`PROCESSED`/`CORRUPTED` + timestamp); inner files encode receipt time (`YYMMDDHHMMSSmmm`) and status (`.rcv`/`.COR`) under a station folder. These conventions populate received-at, station, and status columns without parsing message content.
-- Envelope parsing extracts priority code, destination and origin addresses, and the body keyword line into a message-type column (MVT, MVA, CHG, BSM, PNL, CPM, …; anything unrecognised becomes OTHER). Flight-level fields (flight number, aircraft registration) are parsed for movement-family types. Full raw text is always retained verbatim.
+- Envelope parsing extracts priority code, destination and origin addresses, and the body keyword line into a message-type column (MVT, MVA, CHG, BSM, PNL, CPM, ?? anything unrecognised becomes OTHER). Flight-level fields (flight number, aircraft registration) are parsed for movement-family types. Full raw text is always retained verbatim.
 - Schema: a messages table (identity, received-at, station, status, type, priority, origin, destination, flight number, registration, raw text, source archive, source file, parse-error) joined to an FTS5 full-text index over raw text; an archives table recording ingested sources. Idempotency enforced by uniqueness of source archive + source file.
 - Per-file errors are caught and recorded on the row; ingest continues. A wholly unreadable archive fails that archive with a non-zero exit but does not block subsequent archives.
 - Human-readable tables by default; `--csv` flag for machine consumption with stable column order.
@@ -51,7 +53,7 @@ A command-line toolkit that treats the archives as immutable input: it ingests t
 ## Testing Decisions
 
 - Good tests assert external behaviour only: invoke the CLI against fixture archives, then assert on database contents via its public schema and on stdout/CSV output. No unit tests against parser internals.
-- Single seam: the CLI boundary. Fixtures are the real in-repo archives (read-only integration fixtures) plus tiny synthetic archives for edge cases — empty archive, duplicate re-ingest, malformed message, unknown type.
+- Single seam: the CLI boundary. Fixtures are the real in-repo archives (read-only integration fixtures) plus tiny synthetic archives for edge cases ??empty archive, duplicate re-ingest, malformed message, unknown type.
 - Prior art: none (greenfield); this spec establishes the pattern.
 
 ## Out of Scope
